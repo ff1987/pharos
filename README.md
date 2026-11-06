@@ -95,6 +95,8 @@ That prints `b'ping'`. For HTTP, start an origin and request it by name:
 ```bash
 python3 -m http.server 3000 --bind 127.0.0.1
 curl -sS -H 'Host: demo.local' http://127.0.0.1:7680/
+# With [https] bind = "127.0.0.1:7443" and the lab cert:
+# curl -sS --cacert pharos-dev.crt -H 'Host: demo.local' https://127.0.0.1:7443/
 ```
 
 `demo.local` does not need a DNS record. The server routes on the `Host` header. Any other name gets `404`.
@@ -115,7 +117,8 @@ Server (see `examples/server.toml`):
 - `quic_bind` and `tls_bind` are independent. Set either or both. QUIC is UDP, TLS is TCP, so they can share a port number.
 - `cert_file` and `key_file` are the production identity. `dev_ephemeral_cert = true` is only for a lab.
 - `[acl]` lists `allow_ports` and `allow_hostnames`. If the list is empty and the matching `allow_any_*` flag is false, that class of tunnel is denied.
-- `[http] bind` is the public HTTP listener. Without it, `type = "http"` registrations fail.
+- `[http] bind` is the public HTTP listener. Without `[http]` and without `[https]`, `type = "http"` registrations fail.
+- `[https] bind` is an optional public HTTPS listener. The server terminates TLS there and routes by `Host` on the same table as `[http]`. Certificates default to the server `cert_file` / `key_file` (or `dev_ephemeral_cert`); set `https.cert_file` and `https.key_file` to override. The client still uses `type = "http"` with a plaintext local origin.
 - `tcp_bind_ip` is the address used for reverse TCP ports.
 - `metrics_bind` is off unless set. See [Metrics](#metrics).
 - `[heartbeat]` closes a session that receives no frame for `timeout_secs`. The server re-reads the token, ACL, and heartbeat from the file every couple of seconds. Bind addresses stay as they were at startup.
@@ -161,7 +164,7 @@ The server applies a new token, the ACL (`allow_ports`, `allow_hostnames`, and t
 
 The client applies tunnel list edits on the open control connection: new `[[tunnels]]` entries are registered, removed entries are unregistered, and a changed `local` address is used for the next stream. Changing `remote_port`, `hostname`, or `type` unregisters the old mapping and registers the new one. `server`, `token`, `transport`, and `auth.mode` stay as they were for the current session. The next automatic reconnect reads them from the file. Set `reconnect.enabled = false` when a live session must ignore the file until you restart the process.
 
-These are read at startup only and need a restart: `quic_bind`, `tls_bind`, `http.bind`, `metrics_bind`, `tcp_bind_ip`, certificate files, `auth.mode`, and `auth.client_ca_file`. `metrics_bind` in particular is not switched on or moved by a reload, so a config edit cannot open that port by surprise.
+These are read at startup only and need a restart: `quic_bind`, `tls_bind`, `http.bind`, `https.bind`, `metrics_bind`, `tcp_bind_ip`, certificate files (including `https.cert_file` / `https.key_file`), `auth.mode`, and `auth.client_ca_file`. `metrics_bind` in particular is not switched on or moved by a reload, so a config edit cannot open that port by surprise.
 
 ## Reconnect
 
@@ -192,7 +195,7 @@ Reconnect logs include `attempt`, `backoff_ms`, and `reason`. A clean interrupt 
 
 Logs go through `tracing`. `RUST_LOG` overrides the filter in the config file. `[log] format = "json"` switches to one JSON object per line. The token is not a log field.
 
-Session and forward paths carry `peer` and, once a tunnel is chosen, `tunnel` (the configured name, or the HTTP `Host`). A `session` span covers an authenticated connection. Each public TCP connection is a `tunnel_stream` span. Each HTTP connection is an `http_proxy` span.
+Session and forward paths carry `peer` and, once a tunnel is chosen, `tunnel` (the configured name, or the HTTP `Host`). A `session` span covers an authenticated connection. Each public TCP connection is a `tunnel_stream` span. Each HTTP connection is an `http_proxy` span. Each HTTPS connection is an `https_proxy` span.
 
 ## Metrics
 

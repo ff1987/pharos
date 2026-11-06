@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use pharos_proto::{
-    generate_dev_identity, identity_from_files, identity_from_pem, install_ring, server_config,
-    Identity, LogConfig, LogFormat, ServerConfig,
+    generate_dev_identity, https_terminator_config, identity_from_files, identity_from_pem,
+    install_ring, server_config, Identity, LogConfig, LogFormat, ServerConfig,
 };
 use state::{AppState, Metrics, Shutdown};
 use tokio::net::{TcpListener, TcpSocket};
@@ -31,6 +31,7 @@ pub struct ServerHandle {
     pub quic_addr: Option<SocketAddr>,
     pub tls_addr: Option<SocketAddr>,
     pub http_addr: Option<SocketAddr>,
+    pub https_addr: Option<SocketAddr>,
     pub metrics_addr: Option<SocketAddr>,
     pub shutdown: Shutdown,
     join: Option<JoinHandle<anyhow::Result<()>>>,
@@ -196,6 +197,21 @@ pub async fn spawn(config: ServerConfig) -> anyhow::Result<ServerHandle> {
         None => None,
     };
     let http_bound = local_addr(http_listener.as_ref())?;
+    let https_identity = load_https_identity(&config, &identity)?;
+    let https_listener = match config.https_addr()? {
+        Some(addr) => Some(bind_listener(addr)?),
+        None => None,
+    };
+    let https_bound = local_addr(https_listener.as_ref())?;
+    let https_acceptor = match (&https_listener, https_identity.as_ref()) {
+        (Some(_), Some(https_id)) => Some(TlsAcceptor::from(Arc::new(
+            https_terminator_config(https_id)?,
+        ))),
+        (Some(_), None) => {
+            anyhow::bail!("https listener requires a certificate identity");
+        }
+        _ => None,
+    };
     let metrics_listener = match config.metrics_addr()? {
         Some(addr) => Some(bind_listener(addr)?),
         None => None,
@@ -215,6 +231,7 @@ pub async fn spawn(config: ServerConfig) -> anyhow::Result<ServerHandle> {
         tcp_bind_ip,
         http_routes: Arc::new(RwLock::new(std::collections::HashMap::new())),
         http_advertise: http_bound,
+        https_advertise: https_bound,
         metrics: Arc::new(Metrics::default()),
         shutdown: shutdown.clone(),
         acl_watchers: Mutex::new(Vec::new()),
@@ -233,6 +250,8 @@ pub async fn spawn(config: ServerConfig) -> anyhow::Result<ServerHandle> {
             acceptor,
             quic_endpoint,
             http_listener,
+            https_listener,
+            https_acceptor,
             metrics_listener,
             config_path,
             baseline,
@@ -244,6 +263,7 @@ pub async fn spawn(config: ServerConfig) -> anyhow::Result<ServerHandle> {
         quic = ?quic_bound,
         tls = ?tls_bound,
         http = ?http_bound,
+        https = ?https_bound,
         metrics = ?metrics_bound,
         version = env!("CARGO_PKG_VERSION"),
         "pharos-server listening"
@@ -252,6 +272,7 @@ pub async fn spawn(config: ServerConfig) -> anyhow::Result<ServerHandle> {
         quic_addr: quic_bound,
         tls_addr: tls_bound,
         http_addr: http_bound,
+        https_addr: https_bound,
         metrics_addr: metrics_bound,
         shutdown,
         join: Some(join),
@@ -266,6 +287,8 @@ async fn serve(
     acceptor: TlsAcceptor,
     quic_endpoint: Option<quinn::Endpoint>,
     http_listener: Option<TcpListener>,
+    https_listener: Option<TcpListener>,
+    https_acceptor: Option<TlsAcceptor>,
     metrics_listener: Option<TcpListener>,
     config_path: Option<PathBuf>,
     baseline: ListenerBaseline,
@@ -291,6 +314,13 @@ async fn serve(
         let shutdown = shutdown.clone();
         tasks.spawn(async move {
             http::http_loop(listener, app, shutdown).await;
+        });
+    }
+    if let (Some(listener), Some(https_acceptor)) = (https_listener, https_acceptor) {
+        let app = app.clone();
+        let shutdown = shutdown.clone();
+        tasks.spawn(async move {
+            http::https_loop(listener, https_acceptor, app, shutdown).await;
         });
     }
     if let Some(listener) = metrics_listener {
@@ -332,6 +362,9 @@ struct ListenerBaseline {
     quic_bind: Option<String>,
     tls_bind: Option<String>,
     http_bind: Option<String>,
+    https_bind: Option<String>,
+    https_cert_file: Option<PathBuf>,
+    https_key_file: Option<PathBuf>,
     metrics_bind: Option<String>,
     tcp_bind_ip: String,
     auth_mode: String,
@@ -347,6 +380,15 @@ impl ListenerBaseline {
             quic_bind: config.quic_bind.clone(),
             tls_bind: config.tls_bind.clone(),
             http_bind: config.http.as_ref().map(|http| http.bind.clone()),
+            https_bind: config.https.as_ref().map(|https| https.bind.clone()),
+            https_cert_file: config
+                .https
+                .as_ref()
+                .and_then(|https| https.cert_file.clone()),
+            https_key_file: config
+                .https
+                .as_ref()
+                .and_then(|https| https.key_file.clone()),
             metrics_bind: config.metrics_bind.clone(),
             tcp_bind_ip: config.tcp_bind_ip.clone(),
             auth_mode: config.auth.mode.to_string(),
@@ -364,7 +406,7 @@ impl ListenerBaseline {
         }
         tracing::warn!(
             metrics_bind = ?next.metrics_bind,
-            "listener and identity settings are not hot-reloaded; restart pharos-server to apply quic_bind, tls_bind, http.bind, metrics_bind, tcp_bind_ip, certificates, or auth.mode"
+            "listener and identity settings are not hot-reloaded; restart pharos-server to apply quic_bind, tls_bind, http.bind, https.bind, metrics_bind, tcp_bind_ip, certificates, or auth.mode"
         );
     }
 }
@@ -422,6 +464,23 @@ fn load_client_ca(config: &ServerConfig) -> anyhow::Result<Option<String>> {
         })?));
     }
     anyhow::bail!("auth.client_ca_file is required for mTLS");
+}
+
+fn load_https_identity(
+    config: &ServerConfig,
+    server_identity: &Identity,
+) -> anyhow::Result<Option<Identity>> {
+    let Some(https) = &config.https else {
+        return Ok(None);
+    };
+    if let (Some(cert), Some(key)) = (&https.cert_pem, &https.key_pem) {
+        return Ok(Some(identity_from_pem(cert, key)?));
+    }
+    if let (Some(cert), Some(key)) = (&https.cert_file, &https.key_file) {
+        return Ok(Some(identity_from_files(cert, key)?));
+    }
+    let _ = https;
+    Ok(Some(server_identity.clone()))
 }
 
 fn load_identity(config: &ServerConfig) -> anyhow::Result<Identity> {

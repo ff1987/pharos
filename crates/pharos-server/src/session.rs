@@ -413,10 +413,10 @@ async fn register(ctx: &SessionCtx, request: RegisterTunnel) -> Frame {
             .unwrap_or_else(|_| empty_frame(FrameType::Error))
         }
         Some(TunnelKind::Http) => {
-            if ctx.app.http_advertise.is_none() {
+            if ctx.app.http_advertise.is_none() && ctx.app.https_advertise.is_none() {
                 return fail(
                     code::NOT_AVAILABLE,
-                    "this server is not listening for HTTP".into(),
+                    "this server is not listening for HTTP or HTTPS".into(),
                 );
             }
             let host = request.hostname.trim().to_ascii_lowercase();
@@ -445,11 +445,12 @@ async fn register(ctx: &SessionCtx, request: RegisterTunnel) -> Frame {
             }
             ctx.tunnel_count.fetch_add(1, Ordering::Relaxed);
             ctx.app.metrics.tunnels.fetch_add(1, Ordering::Relaxed);
-            let via = ctx
-                .app
-                .http_advertise
-                .map(|addr| addr.to_string())
-                .unwrap_or_else(|| "http".into());
+            let via = match (ctx.app.http_advertise, ctx.app.https_advertise) {
+                (Some(http), Some(https)) => format!("{http}; https {https}"),
+                (Some(http), None) => http.to_string(),
+                (None, Some(https)) => format!("https {https}"),
+                (None, None) => "http".into(),
+            };
             let endpoint = format!("{host} via {via}");
             tracing::info!(peer = %ctx.peer, tunnel = %request.name, %endpoint, "http tunnel registered");
             RegisterOk {

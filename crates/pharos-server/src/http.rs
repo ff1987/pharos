@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 use tracing::Instrument;
 
 use crate::state::{bridge_public, AppState, Shutdown};
@@ -39,6 +40,7 @@ pub async fn http_loop(listener: TcpListener, app: Arc<AppState>, shutdown: Shut
                 let Ok((sock, peer)) = accepted else {
                     break;
                 };
+                let _ = sock.set_nodelay(true);
                 let app = app.clone();
                 tokio::spawn(async move {
                     let span = tracing::info_span!("http_proxy", %peer);
@@ -51,17 +53,58 @@ pub async fn http_loop(listener: TcpListener, app: Arc<AppState>, shutdown: Shut
     }
 }
 
-async fn handle_http(mut sock: TcpStream, app: Arc<AppState>) -> anyhow::Result<()> {
-    let _ = sock.set_nodelay(true);
+/// Public HTTPS: terminate TLS, then Host-route on the same table as plaintext HTTP.
+pub async fn https_loop(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    app: Arc<AppState>,
+    shutdown: Shutdown,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown.draining() => break,
+            accepted = listener.accept() => {
+                let Ok((sock, peer)) = accepted else {
+                    break;
+                };
+                let _ = sock.set_nodelay(true);
+                let acceptor = acceptor.clone();
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let span = tracing::info_span!("https_proxy", %peer);
+                    async move {
+                        match acceptor.accept(sock).await {
+                            Ok(tls) => {
+                                if let Err(err) = handle_http(tls, app).await {
+                                    tracing::debug!(%peer, error = %err, "https proxy ended");
+                                }
+                            }
+                            Err(err) => {
+                                tracing::debug!(%peer, error = %err, "https handshake failed");
+                            }
+                        }
+                    }
+                    .instrument(span)
+                    .await;
+                });
+            }
+        }
+    }
+}
+
+async fn handle_http<S>(mut sock: S, app: Arc<AppState>) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let head = match read_head(&mut sock).await {
         Ok(head) => head,
         Err(err) => {
-            let _ = sock.write_all(BAD_REQUEST).await;
+            let _ = write_and_close(&mut sock, BAD_REQUEST).await;
             return Err(err);
         }
     };
     let Some(host) = parse_host(&head) else {
-        sock.write_all(BAD_REQUEST).await?;
+        write_and_close(&mut sock, BAD_REQUEST).await?;
         return Ok(());
     };
     let route = {
@@ -70,7 +113,7 @@ async fn handle_http(mut sock: TcpStream, app: Arc<AppState>) -> anyhow::Result<
     };
     let Some(route) = route else {
         tracing::info!(tunnel = %host, "http host not registered");
-        sock.write_all(NOT_FOUND).await?;
+        write_and_close(&mut sock, NOT_FOUND).await?;
         return Ok(());
     };
     tracing::info!(tunnel = %host, "http host routed");
@@ -78,7 +121,7 @@ async fn handle_http(mut sock: TcpStream, app: Arc<AppState>) -> anyhow::Result<
         Ok(opened) => opened,
         Err(err) => {
             tracing::debug!(%host, error = %err, "http tunnel busy or unavailable");
-            sock.write_all(UNAVAILABLE).await?;
+            write_and_close(&mut sock, UNAVAILABLE).await?;
             return Ok(());
         }
     };
@@ -86,7 +129,13 @@ async fn handle_http(mut sock: TcpStream, app: Arc<AppState>) -> anyhow::Result<
     Ok(())
 }
 
-async fn read_head(sock: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
+async fn write_and_close<S: AsyncWrite + Unpin>(sock: &mut S, bytes: &[u8]) -> anyhow::Result<()> {
+    sock.write_all(bytes).await?;
+    let _ = sock.shutdown().await;
+    Ok(())
+}
+
+async fn read_head<S: AsyncRead + Unpin>(sock: &mut S) -> anyhow::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 1024];
     loop {

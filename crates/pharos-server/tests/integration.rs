@@ -122,6 +122,54 @@ async fn spawn_hello() -> SocketAddr {
     addr
 }
 
+fn https_connector(ca_pem: &str) -> tokio_rustls::TlsConnector {
+    pharos_proto::install_ring();
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in pharos_proto::certs_from_pem(ca_pem).expect("ca pem") {
+        roots.add(cert).expect("trust anchor");
+    }
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+}
+
+async fn https_connect(
+    connector: &tokio_rustls::TlsConnector,
+    addr: SocketAddr,
+) -> tokio_rustls::client::TlsStream<TcpStream> {
+    let name = pharos_proto::server_name("localhost").expect("server name");
+    let mut last = String::new();
+    for _ in 0..25 {
+        match TcpStream::connect(addr).await {
+            Ok(sock) => {
+                let _ = sock.set_nodelay(true);
+                match connector.connect(name.clone(), sock).await {
+                    Ok(tls) => return tls,
+                    Err(err) => last = err.to_string(),
+                }
+            }
+            Err(err) => last = err.to_string(),
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    panic!("https connect {addr} failed: {last}");
+}
+
+async fn read_http_body<S>(sock: &mut S) -> Vec<u8>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut body = Vec::new();
+    let result = tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut body)).await;
+    match result {
+        Ok(Ok(_)) => body,
+        Ok(Err(_)) if !body.is_empty() => body,
+        Ok(Err(err)) => panic!("https read failed with empty body: {err}"),
+        Err(_) => panic!("https read timed out"),
+    }
+}
+
 async fn connect_retry(addr: SocketAddr) -> TcpStream {
     let mut last = String::new();
     for _ in 0..25 {
@@ -361,6 +409,60 @@ async fn http_host_routing_and_unknown_host() {
         .await
         .expect("404 timed out")
         .unwrap();
+    let text = String::from_utf8_lossy(&denied);
+    assert!(text.contains("404"), "{text}");
+
+    client.shutdown().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn https_host_routing_and_unknown_host() {
+    let id = identity();
+    let origin = spawn_hello().await;
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\n[https]\nbind = \"127.0.0.1:0\"\n[acl]\nallow_any_hostname = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let https_addr = server.https_addr.expect("https");
+    let tunnels = format!(
+        "[[tunnels]]\nname = \"web\"\ntype = \"http\"\nlocal = \"{origin}\"\nhostname = \"demo.local\"\n"
+    );
+    let config = client_config(
+        "correct-token",
+        server.tls_addr.expect("tls"),
+        "tls",
+        &id.cert,
+        &tunnels,
+        SLOW_HEARTBEAT,
+    );
+    let mut client = pharos_client::spawn(config).await.unwrap();
+    let events = until_settled(&mut client).await;
+    assert!(
+        matches!(events.last(), Some(ClientEvent::Ready)),
+        "{events:?}"
+    );
+
+    let connector = https_connector(&id.cert);
+    let mut sock = https_connect(&connector, https_addr).await;
+    sock.write_all(b"GET / HTTP/1.1\r\nHost: demo.local\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let body = read_http_body(&mut sock).await;
+    assert!(
+        body.windows(5).any(|window| window == b"hello"),
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let mut missing = https_connect(&connector, https_addr).await;
+    missing
+        .write_all(b"GET / HTTP/1.1\r\nHost: nope.local\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let denied = read_http_body(&mut missing).await;
     let text = String::from_utf8_lossy(&denied);
     assert!(text.contains("404"), "{text}");
 

@@ -116,6 +116,17 @@ pub fn server_config(
     Ok(config)
 }
 
+/// TLS config for the public HTTPS listener. No Pharos ALPN — browsers and
+/// plain HTTPS clients speak HTTP/1.1 after the handshake.
+pub fn https_terminator_config(identity: &Identity) -> Result<ServerConfig, ProtoError> {
+    install_ring();
+    let mut config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(identity.certs.clone(), identity.key.clone_key())?;
+    config.alpn_protocols.clear();
+    Ok(config)
+}
+
 pub fn client_config_with_ca(
     ca_pem: &str,
     client: Option<&Identity>,

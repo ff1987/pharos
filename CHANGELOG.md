@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Public HTTPS listener: optional `[https] bind` terminates TLS on the server and routes by `Host` on the same table as plaintext `[http]`. Certificates reuse the server identity unless `https.cert_file` / `https.key_file` override them. Clients keep `type = "http"`. `https.bind` and certs are restart-only.
+
 ## 0.1.0 — 2026-11-06
 
 First release of Pharos. Workspace version `0.1.0`.

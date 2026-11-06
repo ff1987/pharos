@@ -22,7 +22,7 @@ pub use bistream::BiStream;
 pub use codec::{decode_frame, encode_frame, read_frame, write_frame, write_loop, HEADER_LEN};
 pub use config::{
     tokens_equal, AclConfig, AuthMode, ClientAuthConfig, ClientConfig, ConfigError,
-    HeartbeatConfig, HttpBind, LimitsConfig, LogConfig, LogFormat, ReconnectConfig,
+    HeartbeatConfig, HttpBind, HttpsBind, LimitsConfig, LogConfig, LogFormat, ReconnectConfig,
     ServerAuthConfig, ServerConfig, ShutdownConfig, TransportMode, TunnelConfig, TunnelKind,
 };
 pub use error::ProtoError;
@@ -38,6 +38,6 @@ pub use mux::{Demux, MuxHandle, StreamEvent};
 pub use proxy::{bridge_mux, bridge_raw, wait_ready, BytePacer, NoPace, Traffic};
 pub use tlsutil::{
     certs_from_pem, client_config_insecure, client_config_with_ca, generate_dev_identity,
-    identity_from_files, identity_from_pem, install_ring, issue_client_certificate, server_config,
-    server_name, Identity, IssuedClient, ALPN,
+    https_terminator_config, identity_from_files, identity_from_pem, install_ring,
+    issue_client_certificate, server_config, server_name, Identity, IssuedClient, ALPN,
 };

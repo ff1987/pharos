@@ -10,6 +10,13 @@ tcp_bind_ip = "127.0.0.1"
 [http]
 bind = "127.0.0.1:7680"
 
+# Optional public HTTPS listener. TLS is terminated here; Host routing uses the
+# same table as [http]. Certificates default to cert_file/key_file (or
+# dev_ephemeral_cert). Override with https.cert_file / https.key_file if needed.
+# Restart required to change https.bind or certificates.
+# [https]
+# bind = "127.0.0.1:7443"
+
 [acl]
 allow_ports = [2222]
 allow_hostnames = ["demo.local"]

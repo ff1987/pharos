@@ -156,6 +156,7 @@ pub struct AppState {
     pub tcp_bind_ip: IpAddr,
     pub http_routes: Arc<RwLock<HashMap<String, HttpRoute>>>,
     pub http_advertise: Option<SocketAddr>,
+    pub https_advertise: Option<SocketAddr>,
     pub metrics: Arc<Metrics>,
     pub shutdown: Shutdown,
     /// Sessions that should re-check the ACL after a reload.
@@ -509,11 +510,14 @@ impl DataPlane {
     }
 }
 
-pub async fn bridge_public(
-    tcp: tokio::net::TcpStream,
+pub async fn bridge_public<S>(
+    stream: S,
     opened: Opened,
     prefix: &[u8],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let Opened { pipe, permit } = opened;
     let pace = permit.inner.pace.clone();
     let traffic = pharos_proto::Traffic {
@@ -522,14 +526,15 @@ pub async fn bridge_public(
     };
     match pipe {
         Pipe::Mux { id, events, mux } => {
-            pharos_proto::bridge_mux(tcp, id, events, mux, prefix, traffic, pace.as_ref()).await?;
+            pharos_proto::bridge_mux(stream, id, events, mux, prefix, traffic, pace.as_ref())
+                .await?;
         }
         Pipe::Quic { send, recv } => {
             let remote = BiStream {
                 reader: recv,
                 writer: send,
             };
-            pharos_proto::bridge_raw(tcp, remote, prefix, traffic, pace.as_ref()).await?;
+            pharos_proto::bridge_raw(stream, remote, prefix, traffic, pace.as_ref()).await?;
         }
     }
     Ok(())

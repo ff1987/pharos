@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::bistream::BiStream;
@@ -38,16 +37,18 @@ pub struct Traffic<'a> {
 ///
 /// `prefix` is written first. HTTP host routing uses it for the request head that
 /// was already consumed to choose the tunnel.
-pub async fn bridge_mux(
-    tcp: TcpStream,
+pub async fn bridge_mux<S>(
+    stream: S,
     stream_id: u32,
     mut events: mpsc::Receiver<StreamEvent>,
     mux: MuxHandle,
     prefix: &[u8],
     traffic: Traffic<'_>,
     pace: &impl BytePacer,
-) -> Result<(), ProtoError> {
-    let _ = tcp.set_nodelay(true);
+) -> Result<(), ProtoError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     traffic
         .from_tcp
         .fetch_add(prefix.len() as u64, Ordering::Relaxed);
@@ -58,7 +59,7 @@ pub async fn bridge_mux(
         mux.send(data_frame(stream_id, Bytes::copy_from_slice(chunk)))
             .await?;
     }
-    let (mut reader, mut writer) = tcp.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let from_tcp = traffic.from_tcp;
     let to_tcp = traffic.to_tcp;
     let outbound = async {
@@ -107,22 +108,22 @@ pub async fn bridge_mux(
 }
 
 /// Copy bytes between a TCP socket and a dedicated QUIC (or other) byte stream.
-pub async fn bridge_raw<R, W>(
-    tcp: TcpStream,
+pub async fn bridge_raw<S, R, W>(
+    stream: S,
     remote: BiStream<R, W>,
     prefix: &[u8],
     traffic: Traffic<'_>,
     pace: &impl BytePacer,
 ) -> Result<(), ProtoError>
 where
+    S: AsyncRead + AsyncWrite + Unpin,
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    let _ = tcp.set_nodelay(true);
     traffic
         .from_tcp
         .fetch_add(prefix.len() as u64, Ordering::Relaxed);
-    let (mut reader, mut writer) = tcp.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let (mut remote_reader, mut remote_writer) = tokio::io::split(remote);
     if !prefix.is_empty() {
         pace.pace_from_tcp(prefix.len()).await;

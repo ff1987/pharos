@@ -21,11 +21,12 @@ Pharos publishes a machine that is otherwise private. Treat a running server as 
 - Leave `allow_any_port` and `allow_any_hostname` off outside tests. List the ports and names you mean to expose.
 - Bind the server where you intend it to be reachable. The examples listen on `127.0.0.1` on purpose.
 - Remember the server operator can see tunneled bytes. QUIC and TLS protect the path between `pharos-client` and `pharos-server`. They are not end-to-end encryption between a visitor and the origin service. Put TLS on the origin itself when the bytes are sensitive.
+- Optional `[https]` terminates visitor TLS on the server, then forwards plaintext HTTP through the tunnel to the client origin. That is edge TLS, not end-to-end HTTPS to the origin. The control-plane certificate (and optional `https.cert_file`) is what visitors see.
 - Prefer QUIC. The TLS fallback multiplexes every stream on one TCP connection, so a stalled consumer delays the others.
 
 ## Hot reload
 
-A reload can change the token, the ACL, and heartbeat timers. Removing a port or hostname from the ACL closes that published listener even if a client registered it earlier. It cannot change where the process listens. `quic_bind`, `tls_bind`, `http.bind`, `metrics_bind`, `tcp_bind_ip`, certificate files, `auth.mode`, and the client CA stay as they were at startup; restart the process to apply them. That includes turning metrics on or moving `metrics_bind`. A bad config file does not replace the settings that are already running.
+A reload can change the token, the ACL, and heartbeat timers. Removing a port or hostname from the ACL closes that published listener even if a client registered it earlier. It cannot change where the process listens. `quic_bind`, `tls_bind`, `http.bind`, `https.bind`, `metrics_bind`, `tcp_bind_ip`, certificate files (including optional `https.cert_file` / `https.key_file`), `auth.mode`, and the client CA stay as they were at startup; restart the process to apply them. That includes turning metrics on or moving `metrics_bind`. A bad config file does not replace the settings that are already running.
 
 The client can add, remove, and retarget tunnels on the existing control connection. A new server address, token, transport, or auth mode is not applied to that connection. The next automatic reconnect reads them from the config file. Set `reconnect.enabled = false` to keep dialing with the settings from process start until you restart the client. Reconnect does not splice visitor sockets back together; those connections end when the control session ends.
 

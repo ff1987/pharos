@@ -321,6 +321,25 @@ pub struct HttpBind {
     pub bind: String,
 }
 
+/// Public HTTPS listener. TLS is terminated here; Host routing uses the same
+/// table as plaintext `[http]`. Certificates default to the server identity.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpsBind {
+    pub bind: String,
+    /// Optional override. When set, `key_file` must be set too.
+    #[serde(default)]
+    pub cert_file: Option<PathBuf>,
+    #[serde(default)]
+    pub key_file: Option<PathBuf>,
+    /// In-memory cert PEM for tests and embedders (https override).
+    #[serde(skip)]
+    pub cert_pem: Option<String>,
+    /// In-memory key PEM for tests and embedders (https override).
+    #[serde(skip)]
+    pub key_pem: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -347,6 +366,9 @@ pub struct ServerConfig {
     pub tcp_bind_ip: String,
     #[serde(default)]
     pub http: Option<HttpBind>,
+    /// Public HTTPS listener (TLS termination + Host routing). Restart-only.
+    #[serde(default)]
+    pub https: Option<HttpsBind>,
     #[serde(default)]
     pub acl: AclConfig,
     #[serde(default)]
@@ -426,6 +448,34 @@ impl ServerConfig {
         if let Some(http) = &self.http {
             parse_socket_addr(&http.bind, "http.bind")?;
         }
+        if let Some(https) = &self.https {
+            parse_socket_addr(&https.bind, "https.bind")?;
+            if https.cert_file.is_some() != https.key_file.is_some() {
+                return Err(ConfigError::Invalid(
+                    "https.cert_file and https.key_file must be set together".into(),
+                ));
+            }
+            if https.cert_pem.is_some() != https.key_pem.is_some() {
+                return Err(ConfigError::Invalid(
+                    "https.cert_pem and https.key_pem must be set together".into(),
+                ));
+            }
+            let https_inline = https.cert_pem.is_some() && https.key_pem.is_some();
+            let https_files = https.cert_file.is_some() && https.key_file.is_some();
+            let server_inline = self.cert_pem.is_some() && self.key_pem.is_some();
+            let server_files = self.cert_file.is_some() && self.key_file.is_some();
+            if !https_inline
+                && !https_files
+                && !server_inline
+                && !server_files
+                && !self.dev_ephemeral_cert
+            {
+                return Err(ConfigError::Invalid(
+                    "https requires cert_file and key_file (or https.cert_file/https.key_file), or dev_ephemeral_cert = true"
+                        .into(),
+                ));
+            }
+        }
         if let Some(metrics) = &self.metrics_bind {
             parse_socket_addr(metrics, "metrics_bind")?;
         }
@@ -464,6 +514,13 @@ impl ServerConfig {
     pub fn http_addr(&self) -> Result<Option<SocketAddr>, ConfigError> {
         match &self.http {
             Some(http) => Ok(Some(parse_socket_addr(&http.bind, "http.bind")?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn https_addr(&self) -> Result<Option<SocketAddr>, ConfigError> {
+        match &self.https {
+            Some(https) => Ok(Some(parse_socket_addr(&https.bind, "https.bind")?)),
             None => Ok(None),
         }
     }
@@ -826,5 +883,52 @@ mod tests {
         assert_eq!(cfg.auth.mode, AuthMode::Mtls);
         assert!(!cfg.auth.mode.requires_token());
         assert!(cfg.auth.mode.requires_client_cert());
+    }
+
+    #[test]
+    fn https_bind_required_when_section_present() {
+        let toml = r#"
+            token = "x"
+            tls_bind = "127.0.0.1:7600"
+            dev_ephemeral_cert = true
+            [https]
+        "#;
+        let err = ServerConfig::parse_toml(toml).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("bind") || rendered.contains("missing field"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn https_reuses_server_identity_when_no_override() {
+        let toml = r#"
+            token = "x"
+            tls_bind = "127.0.0.1:7600"
+            dev_ephemeral_cert = true
+            [https]
+            bind = "127.0.0.1:7443"
+        "#;
+        let cfg = ServerConfig::parse_toml(toml).expect("https with shared identity");
+        assert_eq!(cfg.https.as_ref().unwrap().bind, "127.0.0.1:7443");
+        assert!(cfg.https_addr().unwrap().is_some());
+    }
+
+    #[test]
+    fn https_cert_override_must_be_paired() {
+        let toml = r#"
+            token = "x"
+            tls_bind = "127.0.0.1:7600"
+            dev_ephemeral_cert = true
+            [https]
+            bind = "127.0.0.1:7443"
+            cert_file = "certs/https.crt"
+        "#;
+        let err = ServerConfig::parse_toml(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("https.cert_file") && err.to_string().contains("key_file"),
+            "{err}"
+        );
     }
 }
