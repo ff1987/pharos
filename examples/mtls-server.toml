@@ -1,0 +1,23 @@
+# Lab server that requires both the PSK and a client certificate.
+# Create the files named below with: bash examples/gen-mtls-certs.sh
+token = "dev-only-change-me"
+quic_bind = "127.0.0.1:7601"
+tls_bind = "127.0.0.1:7601"
+cert_file = "examples/certs/server.crt"
+key_file = "examples/certs/server.key"
+tcp_bind_ip = "127.0.0.1"
+
+[auth]
+mode = "token+mtls"
+client_ca_file = "examples/certs/client-ca.crt"
+
+[http]
+bind = "127.0.0.1:7681"
+
+[acl]
+allow_ports = [2222]
+allow_hostnames = ["demo.local"]
+
+[heartbeat]
+interval_secs = 15
+timeout_secs = 45

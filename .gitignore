@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+pharos-dev.crt
+pharos-dev.key
+examples/certs/
+*.pem
+.DS_Store

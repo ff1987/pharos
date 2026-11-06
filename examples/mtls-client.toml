@@ -1,0 +1,26 @@
+# Pair with examples/mtls-server.toml after bash examples/gen-mtls-certs.sh
+server = "127.0.0.1:7601"
+token = "dev-only-change-me"
+transport = "auto"
+server_name = "localhost"
+ca_file = "examples/certs/server.crt"
+
+[auth]
+mode = "token+mtls"
+cert_file = "examples/certs/client.crt"
+key_file = "examples/certs/client.key"
+
+[reconnect]
+enabled = true
+min_secs = 1
+max_secs = 30
+
+[[tunnels]]
+name = "echo"
+type = "tcp"
+local = "127.0.0.1:7000"
+remote_port = 2222
+
+[heartbeat]
+interval_secs = 15
+timeout_secs = 45

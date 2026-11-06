@@ -1,0 +1,38 @@
+# Loopback demo. Replace the token and bring your own certificate before any
+# other machine can reach this process. dev_ephemeral_cert writes pharos-dev.crt
+# next to this file and is not a production identity.
+token = "dev-only-change-me"
+quic_bind = "127.0.0.1:7600"
+tls_bind = "127.0.0.1:7600"
+dev_ephemeral_cert = true
+tcp_bind_ip = "127.0.0.1"
+
+[http]
+bind = "127.0.0.1:7680"
+
+[acl]
+allow_ports = [2222]
+allow_hostnames = ["demo.local"]
+
+[limits]
+# Per client. 0 means unlimited. Defaults are 64 tunnels and 256 streams.
+max_tunnels = 64
+max_streams = 256
+# Across every client. 0 means unlimited.
+max_tunnels_global = 0
+max_streams_global = 0
+# Per-client byte rates on the public side. 0 means unlimited.
+bytes_in_per_sec = 0
+bytes_out_per_sec = 0
+
+[heartbeat]
+interval_secs = 15
+timeout_secs = 45
+
+[shutdown]
+# Seconds to finish accepted streams after SIGINT or SIGTERM. 0 exits immediately.
+drain_secs = 5
+
+[log]
+format = "pretty"
+filter = "info"

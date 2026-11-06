@@ -1,0 +1,36 @@
+# Loopback demo. tls_insecure skips certificate checks — see SECURITY.md.
+# Point ca_file at the server's pharos-dev.crt and set tls_insecure = false
+# once you want the laptop path to verify the cert.
+server = "127.0.0.1:7600"
+token = "dev-only-change-me"
+transport = "auto"
+server_name = "localhost"
+tls_insecure = true
+
+[heartbeat]
+interval_secs = 15
+timeout_secs = 45
+
+[reconnect]
+enabled = true
+min_secs = 1
+max_secs = 30
+
+[shutdown]
+drain_secs = 5
+
+[[tunnels]]
+name = "echo"
+type = "tcp"
+local = "127.0.0.1:7000"
+remote_port = 2222
+
+[[tunnels]]
+name = "web"
+type = "http"
+local = "127.0.0.1:3000"
+hostname = "demo.local"
+
+[log]
+format = "pretty"
+filter = "info"
