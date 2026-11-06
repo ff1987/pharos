@@ -18,7 +18,8 @@ bind = "127.0.0.1:7680"
 # bind = "127.0.0.1:7443"
 
 [acl]
-allow_ports = [2222]
+# allow_ports covers TCP and UDP remote_port values.
+allow_ports = [2222, 5353]
 allow_hostnames = ["demo.local"]
 
 [limits]

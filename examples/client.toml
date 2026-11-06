@@ -31,6 +31,12 @@ type = "http"
 local = "127.0.0.1:3000"
 hostname = "demo.local"
 
+[[tunnels]]
+name = "dns"
+type = "udp"
+local = "127.0.0.1:5353"
+remote_port = 5353
+
 [log]
 format = "pretty"
 filter = "info"

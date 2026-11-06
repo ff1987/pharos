@@ -8,7 +8,7 @@ A session is one encrypted connection:
 
 | Mode | Socket | How streams are carried |
 |---|---|---|
-| QUIC (default) | UDP | Control frames on the client-opened bidirectional stream. Each TCP or HTTP connection is a new bidirectional QUIC stream: a single `OpenStream` frame, a single `StreamReady` frame, then raw bytes. |
+| QUIC (default) | UDP | Control frames on the client-opened bidirectional stream. Each TCP, HTTP, or UDP association is a new bidirectional QUIC stream: a single `OpenStream` frame, a single `StreamReady` frame, then the data plane below. |
 | TLS | TCP | Every control message and every data chunk is a frame on the one TLS connection. |
 
 Both modes use ALPN `pharos/1`. There is no anonymous mode. The default is a pre-shared token. `auth.mode = "mtls"` or `"token+mtls"` also requires a client certificate during this handshake, before any frame is read.
@@ -61,7 +61,7 @@ Integers are big-endian. A string is a u16 length followed by that many UTF-8 by
 | 17 | Unregister | both | `string name, u32 tunnel_id` |
 | 18 | UnregisterOk | server → client | `string name, u32 tunnel_id` |
 
-`kind` is `1` for TCP and `2` for HTTP. `role` is `1` for the client and `2` for the server. Major `1` is the only major this document defines. Minor is informational in 0.1 (`0`).
+`kind` is `1` for TCP, `2` for HTTP, and `3` for UDP. `role` is `1` for the client and `2` for the server. Major `1` is the only major this document defines. Minor is informational in 0.1 (`0`).
 
 Types `0x80` through `0xFE` are optional. A peer that does not recognize one skips it. Every other unknown type is fatal: the receiver sends `Error` and closes. `0xFF` is reserved and fatal.
 
@@ -96,7 +96,7 @@ After `ReadyAck` the same control connection stays up. The client may send more 
 
 Public traffic before `SessionReady` is not forwarded. That keeps `OpenStream` from racing the client's tunnel table.
 
-`remote_port = 0` asks for an ephemeral TCP port. The server allows it only when `allow_any_port` is set, and `RegisterOk.public_endpoint` is the bound `ip:port`. HTTP's `public_endpoint` is `{hostname} via {http listener}`.
+`remote_port = 0` asks for an ephemeral TCP or UDP port. The server allows it only when `allow_any_port` is set, and `RegisterOk.public_endpoint` is the bound `ip:port`. HTTP's `public_endpoint` is `{hostname} via {http listener}`.
 
 Either side may send `Heartbeat`. The peer answers with `HeartbeatAck` echoing `monotonic_ms`. Any received frame resets the idle timer. If no frame arrives within `heartbeat.timeout_secs`, the session closes.
 
@@ -115,6 +115,10 @@ The server calls open on a new bidirectional stream and writes one `OpenStream` 
 ### HTTP
 
 The server reads the request head (up to 16 KiB, up to the first `\r\n\r\n`), takes the hostname from `Host`, and ignores a trailing `:port` or the brackets of an IPv6 literal. A known host is bridged to that tunnel, including the bytes already read. An unknown host gets `404` and the connection closes. A missing host gets `400`. A full stream table gets `503`.
+
+### UDP
+
+UDP reuses `OpenStream` / `StreamReady` / `Close` (and TLS `Data` frames). The server binds a UDP socket on `tcp_bind_ip:remote_port`. Each distinct public peer address becomes one association stream toward the client. After `StreamReady`, both sides exchange length-prefixed datagrams: `u16` big-endian length, then that many payload bytes (at most 65535). The ACL field `allow_ports` covers UDP `remote_port` the same way it covers TCP. An association that forwards no datagram for 60 seconds is closed with `Close.reason = timeout` (or the QUIC stream is shut down). There is no connection teardown signal from UDP itself.
 
 ## Limits
 

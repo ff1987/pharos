@@ -5,7 +5,7 @@ use pharos_client::{ClientConfig, ClientEvent, ClientHandle};
 use pharos_proto::{generate_dev_identity, issue_client_certificate, ServerConfig};
 use pharos_server::ServerHandle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 struct IdentityPem {
     cert: String,
@@ -413,6 +413,124 @@ async fn http_host_routing_and_unknown_host() {
     assert!(text.contains("404"), "{text}");
 
     client.shutdown().await;
+    server.shutdown().await.unwrap();
+}
+
+async fn spawn_udp_echo() -> SocketAddr {
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65535];
+        loop {
+            let Ok((n, peer)) = sock.recv_from(&mut buf).await else {
+                break;
+            };
+            let _ = sock.send_to(&buf[..n], peer).await;
+        }
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tls_udp_reverse_echo() {
+    udp_echo("tls").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_udp_reverse_echo() {
+    udp_echo("quic").await;
+}
+
+async fn udp_echo(transport: &str) {
+    let id = identity();
+    let echo = spawn_udp_echo().await;
+    let bind = if transport == "quic" {
+        "quic_bind = \"127.0.0.1:0\"\n"
+    } else {
+        "tls_bind = \"127.0.0.1:0\"\n"
+    };
+    let server = boot_server(
+        "correct-token",
+        &format!("{bind}[acl]\nallow_any_port = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n"),
+        &id,
+    )
+    .await;
+    let server_addr = if transport == "quic" {
+        server.quic_addr.expect("quic")
+    } else {
+        server.tls_addr.expect("tls")
+    };
+    let tunnels = format!(
+        "[[tunnels]]\nname = \"dns\"\ntype = \"udp\"\nlocal = \"{echo}\"\nremote_port = 0\n"
+    );
+    let config = client_config(
+        "correct-token",
+        server_addr,
+        transport,
+        &id.cert,
+        &tunnels,
+        SLOW_HEARTBEAT,
+    );
+    let mut client = pharos_client::spawn(config).await.unwrap();
+    let events = until_settled(&mut client).await;
+    assert!(
+        matches!(events.last(), Some(ClientEvent::Ready)),
+        "{events:?}"
+    );
+    let public: SocketAddr = endpoint_of(&events, "dns").parse().unwrap();
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    sock.send_to(b"ping", public).await.unwrap();
+    let mut buf = [0u8; 16];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf))
+        .await
+        .expect("udp echo timed out")
+        .unwrap();
+    assert_eq!(&buf[..n], b"ping");
+    // Second datagram on the same association.
+    sock.send_to(b"pong", public).await.unwrap();
+    let (n, _) = tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf))
+        .await
+        .expect("udp second echo timed out")
+        .unwrap();
+    assert_eq!(&buf[..n], b"pong");
+    client.shutdown().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acl_denies_unlisted_udp_port() {
+    let id = identity();
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\n[acl]\nallow_ports = [1]\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let tunnels =
+        "[[tunnels]]\nname = \"nope\"\ntype = \"udp\"\nlocal = \"127.0.0.1:9\"\nremote_port = 9\n";
+    let config = client_config(
+        "correct-token",
+        server.tls_addr.expect("tls"),
+        "tls",
+        &id.cert,
+        tunnels,
+        SLOW_HEARTBEAT,
+    );
+    let mut client = pharos_client::spawn(config).await.unwrap();
+    let events = until_settled(&mut client).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ClientEvent::RegisterFailed { reason, .. } if reason.contains("ACL")
+        )),
+        "{events:?}"
+    );
+    match events.last() {
+        Some(ClientEvent::SessionEnded { error: Some(error) }) => {
+            assert!(error.contains("no tunnels"), "{error}");
+        }
+        other => panic!("expected session failure, got {other:?}"),
+    }
     server.shutdown().await.unwrap();
 }
 

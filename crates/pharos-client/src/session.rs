@@ -12,7 +12,7 @@ use pharos_proto::{
     TransportMode, TunnelKind, Unregister, UnregisterOk,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
 use tokio_rustls::TlsConnector;
 
@@ -123,8 +123,10 @@ impl TunnelTable {
         }
     }
 
-    fn local(&self, id: u32) -> Option<String> {
-        self.by_id.get(&id).cloned()
+    fn entry(&self, id: u32) -> Option<(String, TunnelKind)> {
+        let name_local = self.by_id.get(&id)?;
+        let tunnel = self.by_name.values().find(|t| t.id == id)?;
+        Some((name_local.clone(), tunnel.kind))
     }
 
     fn insert(&mut self, name: String, tunnel: RegisteredTunnel) {
@@ -815,8 +817,8 @@ where
 }
 
 async fn handle_mux_open(open: OpenStream, mux: MuxHandle, tunnels: Arc<Mutex<TunnelTable>>) {
-    let local = tunnels.lock().expect("tunnels").local(open.tunnel_id);
-    let Some(local) = local else {
+    let entry = tunnels.lock().expect("tunnels").entry(open.tunnel_id);
+    let Some((local, kind)) = entry else {
         tracing::warn!(
             stream = open.stream_id,
             tunnel = open.tunnel_id,
@@ -834,49 +836,97 @@ async fn handle_mux_open(open: OpenStream, mux: MuxHandle, tunnels: Arc<Mutex<Tu
         return;
     };
     let events = mux.register_route(open.stream_id);
-    match TcpStream::connect(&local).await {
-        Ok(sock) => {
-            if mux
-                .send(
-                    StreamReady {
-                        stream_id: open.stream_id,
+    match kind {
+        TunnelKind::Udp => {
+            match bind_udp_local(&local).await {
+                Ok(sock) => {
+                    if mux
+                        .send(
+                            StreamReady {
+                                stream_id: open.stream_id,
+                            }
+                            .to_frame(),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        mux.unregister(open.stream_id);
+                        return;
                     }
-                    .to_frame(),
+                    if let Err(err) = pharos_proto::bridge_udp_mux(
+                        sock,
+                        open.stream_id,
+                        events,
+                        mux.clone(),
+                        discard_traffic(),
+                        &NoPace,
+                        pharos_proto::udp_idle(),
+                    )
+                    .await
+                    {
+                        tracing::debug!(stream = open.stream_id, error = %err, "local udp bridge ended");
+                    }
+                    mux.unregister(open.stream_id);
+                }
+                Err(err) => {
+                    mux.unregister(open.stream_id);
+                    tracing::warn!(%local, error = %err, "udp dial failed");
+                    let _ = mux
+                        .send(
+                            Close {
+                                stream_id: open.stream_id,
+                                reason: close_reason::DIAL_FAILED,
+                            }
+                            .to_frame(),
+                        )
+                        .await;
+                }
+            }
+        }
+        TunnelKind::Tcp | TunnelKind::Http => match TcpStream::connect(&local).await {
+            Ok(sock) => {
+                if mux
+                    .send(
+                        StreamReady {
+                            stream_id: open.stream_id,
+                        }
+                        .to_frame(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    mux.unregister(open.stream_id);
+                    return;
+                }
+                if let Err(err) = pharos_proto::bridge_mux(
+                    sock,
+                    open.stream_id,
+                    events,
+                    mux.clone(),
+                    &[],
+                    discard_traffic(),
+                    &NoPace,
                 )
                 .await
-                .is_err()
-            {
+                {
+                    tracing::debug!(stream = open.stream_id, error = %err, "local bridge ended");
+                }
                 mux.unregister(open.stream_id);
-                return;
             }
-            if let Err(err) = pharos_proto::bridge_mux(
-                sock,
-                open.stream_id,
-                events,
-                mux.clone(),
-                &[],
-                discard_traffic(),
-                &NoPace,
-            )
-            .await
-            {
-                tracing::debug!(stream = open.stream_id, error = %err, "local bridge ended");
+            Err(err) => {
+                mux.unregister(open.stream_id);
+                tracing::warn!(%local, error = %err, "dial failed");
+                let _ = mux
+                    .send(
+                        Close {
+                            stream_id: open.stream_id,
+                            reason: close_reason::DIAL_FAILED,
+                        }
+                        .to_frame(),
+                    )
+                    .await;
             }
-            mux.unregister(open.stream_id);
-        }
-        Err(err) => {
-            mux.unregister(open.stream_id);
-            tracing::warn!(%local, error = %err, "dial failed");
-            let _ = mux
-                .send(
-                    Close {
-                        stream_id: open.stream_id,
-                        reason: close_reason::DIAL_FAILED,
-                    }
-                    .to_frame(),
-                )
-                .await;
-        }
+        },
     }
 }
 
@@ -917,29 +967,76 @@ async fn handle_quic_stream(
         anyhow::bail!("expected OpenStream");
     }
     let open = OpenStream::decode(&frame.payload)?;
-    let local = tunnels.lock().expect("tunnels").local(open.tunnel_id);
-    let Some(local) = local else {
+    let entry = tunnels.lock().expect("tunnels").entry(open.tunnel_id);
+    let Some((local, kind)) = entry else {
         let _ = send.reset(quinn::VarInt::from_u32(1));
         anyhow::bail!("unknown tunnel {}", open.tunnel_id);
     };
-    let tcp = TcpStream::connect(&local).await.map_err(|err| {
-        let _ = send.reset(quinn::VarInt::from_u32(close_reason::DIAL_FAILED as u32));
-        anyhow::anyhow!("dial {local}: {err}")
-    })?;
-    write_frame(
-        &mut send,
-        &StreamReady {
-            stream_id: open.stream_id,
+    match kind {
+        TunnelKind::Udp => {
+            let sock = match bind_udp_local(&local).await {
+                Ok(sock) => sock,
+                Err(err) => {
+                    let _ = send.reset(quinn::VarInt::from_u32(close_reason::DIAL_FAILED as u32));
+                    return Err(err);
+                }
+            };
+            write_frame(
+                &mut send,
+                &StreamReady {
+                    stream_id: open.stream_id,
+                }
+                .to_frame(),
+            )
+            .await?;
+            let remote = BiStream {
+                reader: recv,
+                writer: send,
+            };
+            pharos_proto::bridge_udp_raw(
+                sock,
+                remote,
+                discard_traffic(),
+                &NoPace,
+                pharos_proto::udp_idle(),
+            )
+            .await?;
         }
-        .to_frame(),
-    )
-    .await?;
-    let remote = BiStream {
-        reader: recv,
-        writer: send,
-    };
-    pharos_proto::bridge_raw(tcp, remote, &[], discard_traffic(), &NoPace).await?;
+        TunnelKind::Tcp | TunnelKind::Http => {
+            let tcp = TcpStream::connect(&local).await.map_err(|err| {
+                let _ = send.reset(quinn::VarInt::from_u32(close_reason::DIAL_FAILED as u32));
+                anyhow::anyhow!("dial {local}: {err}")
+            })?;
+            write_frame(
+                &mut send,
+                &StreamReady {
+                    stream_id: open.stream_id,
+                }
+                .to_frame(),
+            )
+            .await?;
+            let remote = BiStream {
+                reader: recv,
+                writer: send,
+            };
+            pharos_proto::bridge_raw(tcp, remote, &[], discard_traffic(), &NoPace).await?;
+        }
+    }
     Ok(())
+}
+
+async fn bind_udp_local(local: &str) -> anyhow::Result<UdpSocket> {
+    let addr: SocketAddr = local
+        .parse()
+        .map_err(|err| anyhow::anyhow!("invalid local udp address {local}: {err}"))?;
+    let bind = if addr.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let sock = UdpSocket::bind(bind).await?;
+    sock.connect(addr).await?;
+    Ok(sock)
 }
 
 fn discard_traffic() -> Traffic<'static> {

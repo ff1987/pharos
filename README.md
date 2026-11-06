@@ -1,8 +1,8 @@
 # Pharos
 
-Pharos is a self-hosted intranet tunnel. A `pharos-client` inside the private network dials out to `pharos-server` and publishes local TCP services, including SSH, plus HTTP virtual hosts. Visitors connect to the server; the server bridges them back through the client.
+Pharos is a self-hosted intranet tunnel. A `pharos-client` inside the private network dials out to `pharos-server` and publishes local TCP and UDP services, including SSH, plus HTTP virtual hosts. Visitors connect to the server; the server bridges them back through the client.
 
-Pharos（灯塔）是自建的内网穿透：客户端从内网主动连出，把本机 TCP 和按 Host 区分的 HTTP 服务发布到你自己的服务器上。协议是自研的，不兼容 frp，也不是 mesh VPN。
+Pharos（灯塔）是自建的内网穿透：客户端从内网主动连出，把本机 TCP/UDP 和按 Host 区分的 HTTP 服务发布到你自己的服务器上。协议是自研的，不兼容 frp，也不是 mesh VPN。
 
 **Version 0.1.0.** That is the workspace version in `Cargo.toml`, the heading in [CHANGELOG.md](CHANGELOG.md), and the product line in [PROTOCOL.md](PROTOCOL.md) and [SECURITY.md](SECURITY.md).
 
@@ -116,10 +116,10 @@ Server (see `examples/server.toml`):
 
 - `quic_bind` and `tls_bind` are independent. Set either or both. QUIC is UDP, TLS is TCP, so they can share a port number.
 - `cert_file` and `key_file` are the production identity. `dev_ephemeral_cert = true` is only for a lab.
-- `[acl]` lists `allow_ports` and `allow_hostnames`. If the list is empty and the matching `allow_any_*` flag is false, that class of tunnel is denied.
+- `[acl]` lists `allow_ports` and `allow_hostnames`. `allow_ports` covers both TCP and UDP `remote_port` values. If the list is empty and the matching `allow_any_*` flag is false, that class of tunnel is denied.
 - `[http] bind` is the public HTTP listener. Without `[http]` and without `[https]`, `type = "http"` registrations fail.
 - `[https] bind` is an optional public HTTPS listener. The server terminates TLS there and routes by `Host` on the same table as `[http]`. Certificates default to the server `cert_file` / `key_file` (or `dev_ephemeral_cert`); set `https.cert_file` and `https.key_file` to override. The client still uses `type = "http"` with a plaintext local origin.
-- `tcp_bind_ip` is the address used for reverse TCP ports.
+- `tcp_bind_ip` is the address used for reverse TCP and UDP ports.
 - `metrics_bind` is off unless set. See [Metrics](#metrics).
 - `[heartbeat]` closes a session that receives no frame for `timeout_secs`. The server re-reads the token, ACL, and heartbeat from the file every couple of seconds. Bind addresses stay as they were at startup.
 
@@ -129,10 +129,10 @@ Client (see `examples/client.toml`):
 - `transport` is `auto` (default), `quic`, or `tls`.
 - `ca_file` trusts the server certificate. `tls_insecure = true` does not.
 - `[auth] mode` is `token` (default), `mtls`, or `token+mtls`. See [mTLS](#mtls) below.
-- Each `[[tunnels]]` entry is `type = "tcp"` with `local` and `remote_port`, or `type = "http"` with `local` and `hostname`. `local` is `host:port`, for example `127.0.0.1:22`.
+- Each `[[tunnels]]` entry is `type = "tcp"` or `type = "udp"` with `local` and `remote_port`, or `type = "http"` with `local` and `hostname`. `local` is `host:port`, for example `127.0.0.1:22`. UDP opens one association stream per public peer and closes it after 60 seconds idle.
 - The client reconnects with exponential backoff unless `reconnect.enabled = false`.
 
-A TCP tunnel with `remote_port = 0` asks for an ephemeral port. The server only allows that when `allow_any_port = true`, and it reports the chosen port in the log.
+A TCP or UDP tunnel with `remote_port = 0` asks for an ephemeral port. The server only allows that when `allow_any_port = true`, and it reports the chosen port in the log.
 
 ## mTLS
 
@@ -195,7 +195,7 @@ Reconnect logs include `attempt`, `backoff_ms`, and `reason`. A clean interrupt 
 
 Logs go through `tracing`. `RUST_LOG` overrides the filter in the config file. `[log] format = "json"` switches to one JSON object per line. The token is not a log field.
 
-Session and forward paths carry `peer` and, once a tunnel is chosen, `tunnel` (the configured name, or the HTTP `Host`). A `session` span covers an authenticated connection. Each public TCP connection is a `tunnel_stream` span. Each HTTP connection is an `http_proxy` span. Each HTTPS connection is an `https_proxy` span.
+Session and forward paths carry `peer` and, once a tunnel is chosen, `tunnel` (the configured name, or the HTTP `Host`). A `session` span covers an authenticated connection. Each public TCP connection is a `tunnel_stream` span. Each UDP peer association is a `udp_assoc` span. Each HTTP connection is an `http_proxy` span. Each HTTPS connection is an `https_proxy` span.
 
 ## Metrics
 
@@ -223,7 +223,7 @@ The scrape has no authentication of its own. Bind it to a trusted address. It do
 cargo test --workspace
 ```
 
-The integration tests bring up a real server and client on `127.0.0.1` and cover rejected tokens, accepted tokens, TCP echo over TLS and over QUIC, an ACL denial, HTTP host routing (including an unknown host), and an idle heartbeat timeout.
+The integration tests bring up a real server and client on `127.0.0.1` and cover rejected tokens, accepted tokens, TCP and UDP echo over TLS and over QUIC, ACL denials, HTTP/HTTPS host routing (including an unknown host), and an idle heartbeat timeout.
 
 ## Further reading
 

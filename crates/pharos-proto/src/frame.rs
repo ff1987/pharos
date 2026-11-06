@@ -43,6 +43,7 @@ pub const ROLE_SERVER: u8 = 2;
 
 pub const TUNNEL_TCP: u8 = 1;
 pub const TUNNEL_HTTP: u8 = 2;
+pub const TUNNEL_UDP: u8 = 3;
 
 /// Mandatory frame types. Types with the high bit set (`0x80`–`0xFE`) are optional
 /// and must be ignored by receivers that do not understand them.
@@ -580,6 +581,17 @@ mod tests {
         let frame = http.to_frame().unwrap();
         let decoded = roundtrip_payload(&frame);
         assert_eq!(RegisterTunnel::decode(&decoded.payload).unwrap(), http);
+
+        let udp = RegisterTunnel {
+            name: "dns".into(),
+            kind: TUNNEL_UDP,
+            local: "127.0.0.1:53".into(),
+            remote_port: 5353,
+            hostname: String::new(),
+        };
+        let frame = udp.to_frame().unwrap();
+        let decoded = roundtrip_payload(&frame);
+        assert_eq!(RegisterTunnel::decode(&decoded.payload).unwrap(), udp);
     }
 
     #[test]

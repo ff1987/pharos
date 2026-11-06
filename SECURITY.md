@@ -9,7 +9,7 @@ Pharos publishes a machine that is otherwise private. Treat a running server as 
 - `mtls` and `token+mtls` require a client certificate signed by `auth.client_ca_file`, with the clientAuth extended key usage. rustls checks the chain before any Pharos frame is read. A wrong certificate fails the handshake. `mtls` does not check the token; keep a token as well with `token+mtls` unless you have decided certificates are the only credential.
 - Logs record the peer address and the result. They do not record the token or private keys.
 - The control connection is QUIC or TLS with ALPN `pharos/1`. Certificate verification is on unless the client sets `tls_insecure = true`.
-- The server ACL is fail-closed. A TCP port is published only if it is listed in `allow_ports` or `allow_any_port` is set. An HTTP hostname is published only if it is listed in `allow_hostnames` or `allow_any_hostname` is set. `remote_port = 0` (ephemeral) requires `allow_any_port`.
+- The server ACL is fail-closed. A TCP or UDP `remote_port` is published only if it is listed in `allow_ports` or `allow_any_port` is set. An HTTP hostname is published only if it is listed in `allow_hostnames` or `allow_any_hostname` is set. `remote_port = 0` (ephemeral) requires `allow_any_port`.
 - Frame sizes, tunnel counts, and concurrent streams are capped. A bad mandatory frame closes the session.
 - The server can re-read the token, ACL, and heartbeat settings from the config file. A broken file keeps the previous settings. Listener addresses do not change until restart.
 
@@ -23,6 +23,7 @@ Pharos publishes a machine that is otherwise private. Treat a running server as 
 - Remember the server operator can see tunneled bytes. QUIC and TLS protect the path between `pharos-client` and `pharos-server`. They are not end-to-end encryption between a visitor and the origin service. Put TLS on the origin itself when the bytes are sensitive.
 - Optional `[https]` terminates visitor TLS on the server, then forwards plaintext HTTP through the tunnel to the client origin. That is edge TLS, not end-to-end HTTPS to the origin. The control-plane certificate (and optional `https.cert_file`) is what visitors see.
 - Prefer QUIC. The TLS fallback multiplexes every stream on one TCP connection, so a stalled consumer delays the others.
+- UDP associations are idle-timed (60 seconds). There is no authenticity check on public UDP datagrams beyond reaching the published port; treat UDP tunnels like any other open UDP service.
 
 ## Hot reload
 

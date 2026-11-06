@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use bytes::Bytes;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -9,7 +10,7 @@ use pharos_proto::{
     close_reason, read_frame, wait_ready, write_frame, AclConfig, AuthMode, BiStream, Close,
     FrameType, HeartbeatConfig, LimitsConfig, MuxHandle, OpenStream, StreamReady,
 };
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -266,9 +267,17 @@ pub struct HttpPending {
     pub name: String,
 }
 
+pub struct UdpPending {
+    pub socket: UdpSocket,
+    pub tunnel_id: u32,
+    pub name: String,
+    pub remote_port: u16,
+}
+
 pub struct Pending {
     pub tcp: Vec<TcpPending>,
     pub http: Vec<HttpPending>,
+    pub udp: Vec<UdpPending>,
 }
 
 enum PlaneKind {
@@ -535,6 +544,40 @@ where
                 writer: send,
             };
             pharos_proto::bridge_raw(stream, remote, prefix, traffic, pace.as_ref()).await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn bridge_udp_public(
+    socket: std::sync::Arc<UdpSocket>,
+    peer: SocketAddr,
+    inbound: tokio::sync::mpsc::Receiver<Bytes>,
+    opened: Opened,
+) -> anyhow::Result<()> {
+    let Opened { pipe, permit } = opened;
+    let pace = permit.inner.pace.clone();
+    let traffic = pharos_proto::Traffic {
+        from_tcp: &permit.inner.metrics.bytes_in,
+        to_tcp: &permit.inner.metrics.bytes_out,
+    };
+    let idle = pharos_proto::udp_idle();
+    match pipe {
+        Pipe::Mux { id, events, mux } => {
+            pharos_proto::bridge_udp_assoc_mux(
+                socket, peer, inbound, id, events, mux, traffic, pace.as_ref(), idle,
+            )
+            .await?;
+        }
+        Pipe::Quic { send, recv } => {
+            let remote = BiStream {
+                reader: recv,
+                writer: send,
+            };
+            pharos_proto::bridge_udp_assoc_raw(
+                socket, peer, inbound, remote, traffic, pace.as_ref(), idle,
+            )
+            .await?;
         }
     }
     Ok(())

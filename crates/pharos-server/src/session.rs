@@ -1,19 +1,21 @@
+use bytes::Bytes;
 use pharos_proto::{
     code, empty_frame, server_authenticate, ErrorBody, Frame, FrameType, Heartbeat, HeartbeatAck,
     MuxHandle, ProtoError, RegisterFail, RegisterOk, RegisterTunnel, ServerHandshake, TunnelKind,
     Unregister, UnregisterOk,
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::watch;
 use tracing::Instrument;
 
 use crate::state::{
-    bridge_public, AppState, DataPlane, HttpPending, HttpRoute, Pending, SessionGuard, Shutdown,
-    TcpPending, TrackedTunnel,
+    bridge_public, bridge_udp_public, AppState, DataPlane, HttpPending, HttpRoute, Pending,
+    SessionGuard, Shutdown, TcpPending, TrackedTunnel, UdpPending,
 };
 
 pub struct SessionCtx {
@@ -103,6 +105,7 @@ where
         pending: Mutex::new(Pending {
             tcp: Vec::new(),
             http: Vec::new(),
+            udp: Vec::new(),
         }),
         next_tunnel: AtomicU32::new(1),
         tunnel_count: AtomicU32::new(0),
@@ -461,6 +464,53 @@ async fn register(ctx: &SessionCtx, request: RegisterTunnel) -> Frame {
             .to_frame()
             .unwrap_or_else(|_| empty_frame(FrameType::Error))
         }
+        Some(TunnelKind::Udp) => {
+            if !acl.permits_port(request.remote_port) {
+                ctx.app.metrics.acl_deny.fetch_add(1, Ordering::Relaxed);
+                tracing::info!(
+                    peer = %ctx.peer,
+                    tunnel = %request.name,
+                    port = request.remote_port,
+                    "acl denied udp port"
+                );
+                return fail(
+                    code::ACL_DENIED,
+                    format!("port {} is not in the ACL", request.remote_port),
+                );
+            }
+            let addr = SocketAddr::new(ctx.app.tcp_bind_ip, request.remote_port);
+            let socket = match UdpSocket::bind(addr).await {
+                Ok(socket) => socket,
+                Err(err) => {
+                    return fail(code::BIND_FAILED, format!("bind udp {addr}: {err}"));
+                }
+            };
+            let bound = match socket.local_addr() {
+                Ok(bound) => bound,
+                Err(err) => return fail(code::BIND_FAILED, err.to_string()),
+            };
+            let bound_port = bound.port();
+            if *ctx.ready_rx.borrow() {
+                spawn_udp(ctx, socket, tunnel_id, request.name.clone(), bound_port);
+            } else {
+                ctx.pending.lock().expect("pending").udp.push(UdpPending {
+                    socket,
+                    tunnel_id,
+                    name: request.name.clone(),
+                    remote_port: bound_port,
+                });
+            }
+            ctx.tunnel_count.fetch_add(1, Ordering::Relaxed);
+            ctx.app.metrics.tunnels.fetch_add(1, Ordering::Relaxed);
+            tracing::info!(peer = %ctx.peer, tunnel = %request.name, %bound, "udp tunnel registered");
+            RegisterOk {
+                name: request.name,
+                tunnel_id,
+                public_endpoint: bound.to_string(),
+            }
+            .to_frame()
+            .unwrap_or_else(|_| empty_frame(FrameType::Error))
+        }
         None => fail(code::BAD_REQUEST, "unknown tunnel type".into()),
     }
 }
@@ -557,16 +607,95 @@ fn spawn_tcp(
     );
 }
 
+
+fn spawn_udp(
+    ctx: &SessionCtx,
+    socket: UdpSocket,
+    tunnel_id: u32,
+    tunnel: String,
+    remote_port: u16,
+) {
+    let plane = ctx.plane.clone();
+    let mut ready = ctx.ready_rx.clone();
+    let shutdown = ctx.app.shutdown.clone();
+    let tunnel_for_span = tunnel.clone();
+    let socket = std::sync::Arc::new(socket);
+    let task = tokio::spawn(async move {
+        if !*ready.borrow() {
+            let _ = ready.wait_for(|value| *value).await;
+        }
+        let associations: std::sync::Arc<
+            tokio::sync::Mutex<HashMap<SocketAddr, tokio::sync::mpsc::Sender<Bytes>>>,
+        > = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let mut buf = vec![0u8; pharos_proto::MAX_UDP_DATAGRAM];
+        loop {
+            tokio::select! {
+                _ = shutdown.draining() => break,
+                recv = socket.recv_from(&mut buf) => {
+                    let Ok((n, peer)) = recv else { break };
+                    let packet = Bytes::copy_from_slice(&buf[..n]);
+                    let mut map = associations.lock().await;
+                    if let Some(tx) = map.get(&peer) {
+                        let _ = tx.try_send(packet);
+                        continue;
+                    }
+                    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(32);
+                    let _ = tx.try_send(packet);
+                    map.insert(peer, tx);
+                    drop(map);
+                    let plane = plane.clone();
+                    let socket = socket.clone();
+                    let associations = associations.clone();
+                    let tunnel = tunnel_for_span.clone();
+                    let span = tracing::info_span!("udp_assoc", %peer, %tunnel);
+                    tokio::spawn(
+                        async move {
+                            match plane.open(tunnel_id).await {
+                                Ok(opened) => {
+                                    if let Err(err) =
+                                        bridge_udp_public(socket, peer, rx, opened).await
+                                    {
+                                        tracing::debug!(error = %err, "udp association ended");
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::debug!(error = %err, "udp stream refused");
+                                }
+                            }
+                            associations.lock().await.remove(&peer);
+                        }
+                        .instrument(span),
+                    );
+                }
+            }
+        }
+    });
+    ctx.guard.track(
+        tunnel_id,
+        TrackedTunnel {
+            name: tunnel,
+            remote_port,
+            hostname: String::new(),
+            task: Some(task),
+            host: None,
+        },
+    );
+}
+
 async fn publish(ctx: &SessionCtx) {
     let pending = {
         let mut pending = ctx.pending.lock().expect("pending");
         Pending {
             tcp: std::mem::take(&mut pending.tcp),
             http: std::mem::take(&mut pending.http),
+            udp: std::mem::take(&mut pending.udp),
         }
     };
     for tcp in pending.tcp {
         spawn_tcp(ctx, tcp.listener, tcp.tunnel_id, tcp.name, tcp.remote_port);
+    }
+    for udp in pending.udp {
+        spawn_udp(ctx, udp.socket, udp.tunnel_id, udp.name, udp.remote_port);
     }
     for http in pending.http {
         if ctx

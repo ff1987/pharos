@@ -120,6 +120,7 @@ impl Default for ClientAuthConfig {
 pub enum TunnelKind {
     Tcp,
     Http,
+    Udp,
 }
 
 impl TunnelKind {
@@ -127,6 +128,7 @@ impl TunnelKind {
         match self {
             Self::Tcp => crate::frame::TUNNEL_TCP,
             Self::Http => crate::frame::TUNNEL_HTTP,
+            Self::Udp => crate::frame::TUNNEL_UDP,
         }
     }
 
@@ -134,6 +136,7 @@ impl TunnelKind {
         match value {
             crate::frame::TUNNEL_TCP => Some(Self::Tcp),
             crate::frame::TUNNEL_HTTP => Some(Self::Http),
+            crate::frame::TUNNEL_UDP => Some(Self::Udp),
             _ => None,
         }
     }
@@ -275,15 +278,16 @@ fn default_max_streams() -> u32 {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AclConfig {
-    /// TCP `remote_port` values a client may bind. Empty denies every port
-    /// unless [`Self::allow_any_port`] is set.
+    /// TCP and UDP `remote_port` values a client may bind. Empty denies every
+    /// port unless [`Self::allow_any_port`] is set. The same ACL list covers
+    /// both tunnel kinds; TCP and UDP may still share a port number.
     #[serde(default)]
     pub allow_ports: Vec<u16>,
     /// HTTP hostnames a client may claim. Empty denies every name unless
     /// [`Self::allow_any_hostname`] is set. Matching is case-insensitive.
     #[serde(default)]
     pub allow_hostnames: Vec<String>,
-    /// Permit any TCP port, including ephemeral `remote_port = 0`.
+    /// Permit any TCP or UDP port, including ephemeral `remote_port = 0`.
     #[serde(default)]
     pub allow_any_port: bool,
     /// Permit any HTTP hostname.
@@ -700,7 +704,7 @@ impl ClientConfig {
                 )));
             }
             match tunnel.kind {
-                TunnelKind::Tcp => {}
+                TunnelKind::Tcp | TunnelKind::Udp => {}
                 TunnelKind::Http => {
                     if tunnel.hostname.is_empty() {
                         return Err(ConfigError::Invalid(format!(
@@ -931,4 +935,22 @@ mod tests {
             "{err}"
         );
     }
+
+    #[test]
+    fn udp_tunnel_parses_like_tcp() {
+        let toml = r#"
+            server = "127.0.0.1:7600"
+            token = "x"
+            tls_insecure = true
+            [[tunnels]]
+            name = "dns"
+            type = "udp"
+            local = "127.0.0.1:53"
+            remote_port = 5353
+        "#;
+        let cfg = ClientConfig::parse_toml(toml).expect("udp tunnel");
+        assert_eq!(cfg.tunnels[0].kind, TunnelKind::Udp);
+        assert_eq!(cfg.tunnels[0].remote_port, 5353);
+    }
+
 }
