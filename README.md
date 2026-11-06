@@ -110,7 +110,7 @@ ca_file = "examples/pharos-dev.crt"
 
 ## Configuration
 
-Both programs take `-c FILE`. Tokens are required. An empty token, or a file that omits `token`, will not start.
+Both programs take `-c FILE`. The client always needs a non-empty `token`. On the server, `token` and/or `auth.tokens` must supply at least one non-empty secret when `auth.mode` is `token` or `token+mtls`.
 
 Server (see `examples/server.toml`):
 
@@ -121,7 +121,8 @@ Server (see `examples/server.toml`):
 - `[https] bind` is an optional public HTTPS listener. The server terminates TLS there and routes by `Host` on the same table as `[http]`. Certificates default to the server `cert_file` / `key_file` (or `dev_ephemeral_cert`); set `https.cert_file` and `https.key_file` to override. The client still uses `type = "http"` with a plaintext local origin.
 - `tcp_bind_ip` is the address used for reverse TCP and UDP ports.
 - `metrics_bind` is off unless set. See [Metrics](#metrics).
-- `[heartbeat]` closes a session that receives no frame for `timeout_secs`. The server re-reads the token, ACL, and heartbeat from the file every couple of seconds. Bind addresses stay as they were at startup.
+- `token` is the primary pre-shared secret. Optional `auth.tokens = ["…", "…"]` adds more accepted secrets; any match authenticates. The accepted set is the union of a non-empty `token` and every `auth.tokens` entry.
+- `[heartbeat]` closes a session that receives no frame for `timeout_secs`. The server re-reads the accepted token set, ACL, and heartbeat from the file every couple of seconds. Bind addresses stay as they were at startup.
 
 Client (see `examples/client.toml`):
 
@@ -160,7 +161,7 @@ bash examples/gen-mtls-certs.sh
 
 Both processes re-read their config file about twice a second. A file that fails to parse is ignored and the previous settings stay in effect.
 
-The server applies a new token, the ACL (`allow_ports`, `allow_hostnames`, and the `allow_any_*` flags), and heartbeat intervals without dropping live sessions. A port or hostname removed from the ACL stops accepting new connections immediately. Adding a port to the ACL does not publish it by itself; the client still has to register that mapping.
+The server applies a new accepted token set (`token` plus `auth.tokens`), the ACL (`allow_ports`, `allow_hostnames`, and the `allow_any_*` flags), and heartbeat intervals without dropping live sessions. A port or hostname removed from the ACL stops accepting new connections immediately. Adding a port to the ACL does not publish it by itself; the client still has to register that mapping.
 
 The client applies tunnel list edits on the open control connection: new `[[tunnels]]` entries are registered, removed entries are unregistered, and a changed `local` address is used for the next stream. Changing `remote_port`, `hostname`, or `type` unregisters the old mapping and registers the new one. `server`, `token`, `transport`, and `auth.mode` stay as they were for the current session. The next automatic reconnect reads them from the file. Set `reconnect.enabled = false` when a live session must ignore the file until you restart the process.
 
@@ -223,7 +224,7 @@ The scrape has no authentication of its own. Bind it to a trusted address. It do
 cargo test --workspace
 ```
 
-The integration tests bring up a real server and client on `127.0.0.1` and cover rejected tokens, accepted tokens, TCP and UDP echo over TLS and over QUIC, ACL denials, HTTP/HTTPS host routing (including an unknown host), and an idle heartbeat timeout.
+The integration tests bring up a real server and client on `127.0.0.1` and cover rejected tokens, accepted tokens (including multi-token and token-set hot reload), TCP and UDP echo over TLS and over QUIC, ACL denials, HTTP/HTTPS host routing (including an unknown host), and an idle heartbeat timeout.
 
 ## Further reading
 

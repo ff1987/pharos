@@ -2,6 +2,9 @@
 # other machine can reach this process. dev_ephemeral_cert writes pharos-dev.crt
 # next to this file and is not a production identity.
 token = "dev-only-change-me"
+# Optional extra secrets. Any of token or auth.tokens may authenticate.
+# [auth]
+# tokens = ["rotation-b", "rotation-c"]
 quic_bind = "127.0.0.1:7600"
 tls_bind = "127.0.0.1:7600"
 dev_ephemeral_cert = true

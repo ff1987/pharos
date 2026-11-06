@@ -9,7 +9,7 @@ use crate::frame::{
     code, Auth, AuthFail, AuthOk, ErrorBody, FrameType, Hello, ROLE_CLIENT, ROLE_SERVER,
     VERSION_MAJOR,
 };
-use crate::tokens_equal;
+use crate::token_accepted;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -86,7 +86,7 @@ pub struct ServerHandshake {
 pub async fn server_authenticate<R, W>(
     reader: &mut R,
     writer: &mut W,
-    expected_token: &str,
+    expected_tokens: &[String],
     check_token: bool,
     heartbeat_interval_ms: u32,
 ) -> Result<ServerHandshake, ProtoError>
@@ -125,7 +125,7 @@ where
             return Err(ProtoError::BadType(frame.ty));
         }
         let auth = Auth::decode(&frame.payload)?;
-        if check_token && !tokens_equal(expected_token, &auth.token) {
+        if check_token && !token_accepted(expected_tokens, &auth.token) {
             let fail = AuthFail {
                 code: code::AUTH_FAILED,
                 reason: "authentication failed".into(),

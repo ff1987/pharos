@@ -224,7 +224,7 @@ pub async fn spawn(config: ServerConfig) -> anyhow::Result<ServerHandle> {
         .map_err(|err| anyhow::anyhow!("tcp_bind_ip: {err}"))?;
     let app = Arc::new(AppState {
         auth_mode: config.auth.mode,
-        token: RwLock::new(config.token.clone()),
+        tokens: RwLock::new(config.accepted_tokens()),
         acl: RwLock::new(config.acl.clone()),
         heartbeat: RwLock::new(config.heartbeat.clone()),
         limits: Arc::new(RwLock::new(config.limits.clone())),
@@ -436,13 +436,13 @@ async fn reload_loop(
             Ok(cfg) => {
                 seen = Some(bytes);
                 baseline.warn_if_restart_required(&cfg);
-                *app.token.write().expect("token") = cfg.token;
+                *app.tokens.write().expect("tokens") = cfg.accepted_tokens();
                 *app.acl.write().expect("acl") = cfg.acl.clone();
                 *app.heartbeat.write().expect("heartbeat") = cfg.heartbeat;
                 *app.limits.write().expect("limits") = cfg.limits;
                 let mut watchers = app.acl_watchers.lock().expect("acl watchers");
                 watchers.retain(|tx| tx.send(cfg.acl.clone()).is_ok());
-                tracing::info!("reloaded token, ACL, heartbeat, and limits");
+                tracing::info!("reloaded tokens, ACL, heartbeat, and limits");
             }
             Err(err) => {
                 tracing::error!(error = %err, "config reload failed; keeping the previous settings");

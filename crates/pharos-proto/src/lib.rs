@@ -22,7 +22,7 @@ mod udp;
 pub use bistream::BiStream;
 pub use codec::{decode_frame, encode_frame, read_frame, write_frame, write_loop, HEADER_LEN};
 pub use config::{
-    tokens_equal, AclConfig, AuthMode, ClientAuthConfig, ClientConfig, ConfigError,
+    token_accepted, tokens_equal, AclConfig, AuthMode, ClientAuthConfig, ClientConfig, ConfigError,
     HeartbeatConfig, HttpBind, HttpsBind, LimitsConfig, LogConfig, LogFormat, ReconnectConfig,
     ServerAuthConfig, ServerConfig, ShutdownConfig, TransportMode, TunnelConfig, TunnelKind,
 };

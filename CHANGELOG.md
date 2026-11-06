@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Multi-token auth: keep top-level `token`, add optional `auth.tokens = ["…", "…"]`. The accepted set is their union; any match returns `AuthOk`. Empty auth is still forbidden in `token` / `token+mtls`. Hot reload replaces the whole accepted set for later handshakes (no per-token ACL).
+
 - UDP reverse tunnels: client `type = "udp"` with `local` and `remote_port`. The server binds UDP on `tcp_bind_ip:remote_port`, opens one association stream per public peer, and forwards length-prefixed datagrams. `allow_ports` / `allow_any_port` apply to UDP as well as TCP. Idle associations time out after 60 seconds.
 - Public HTTPS listener: optional `[https] bind` terminates TLS on the server and routes by `Host` on the same table as plaintext `[http]`. Certificates reuse the server identity unless `https.cert_file` / `https.key_file` override them. Clients keep `type = "http"`. `https.bind` and certs are restart-only.
 

@@ -5,18 +5,18 @@ Pharos publishes a machine that is otherwise private. Treat a running server as 
 ## What 0.1.0 guarantees
 
 - There is no anonymous mode. `auth.mode` is `token` (default), `mtls`, or `token+mtls`.
-- `token` and `token+mtls` require the pre-shared token. An empty token is rejected at startup for those modes. The token is compared as SHA-256 digests with a constant-time equality check.
+- `token` and `token+mtls` require at least one pre-shared secret from the top-level `token` and/or `auth.tokens`. An empty accepted set is rejected at startup for those modes. Each presented secret is hashed with SHA-256 and compared against every configured digest without an early exit on the raw strings.
 - `mtls` and `token+mtls` require a client certificate signed by `auth.client_ca_file`, with the clientAuth extended key usage. rustls checks the chain before any Pharos frame is read. A wrong certificate fails the handshake. `mtls` does not check the token; keep a token as well with `token+mtls` unless you have decided certificates are the only credential.
 - Logs record the peer address and the result. They do not record the token or private keys.
 - The control connection is QUIC or TLS with ALPN `pharos/1`. Certificate verification is on unless the client sets `tls_insecure = true`.
 - The server ACL is fail-closed. A TCP or UDP `remote_port` is published only if it is listed in `allow_ports` or `allow_any_port` is set. An HTTP hostname is published only if it is listed in `allow_hostnames` or `allow_any_hostname` is set. `remote_port = 0` (ephemeral) requires `allow_any_port`.
 - Frame sizes, tunnel counts, and concurrent streams are capped. A bad mandatory frame closes the session.
-- The server can re-read the token, ACL, and heartbeat settings from the config file. A broken file keeps the previous settings. Listener addresses do not change until restart.
+- The server can re-read the accepted token set, ACL, and heartbeat settings from the config file. A broken file keeps the previous settings. Listener addresses do not change until restart.
 
 ## What you must do
 
-- Generate a long random token and keep `server.toml` and `client.toml` readable only by the accounts that run Pharos. Anyone with the token can register any tunnel the ACL allows. In `token+mtls` they also need a certificate from your client CA. Protect `client.key` the same way.
-- `auth.mode` and `auth.client_ca_file` are applied when the process starts. Reloading the file updates the token, ACL, and heartbeat only. Restart to turn mTLS on or to rotate the client CA.
+- Generate long random tokens and keep `server.toml` and `client.toml` readable only by the accounts that run Pharos. Anyone with an accepted token can register any tunnel the ACL allows. In `token+mtls` they also need a certificate from your client CA. Protect `client.key` the same way. Use `auth.tokens` (with or without top-level `token`) when rotating secrets so more than one value is valid during a cutover.
+- `auth.mode` and `auth.client_ca_file` are applied when the process starts. Reloading the file updates the accepted token set, ACL, and heartbeat only. Restart to turn mTLS on or to rotate the client CA.
 - Use a certificate you control (`cert_file` / `key_file` on the server, `ca_file` on the client). `dev_ephemeral_cert = true` writes `pharos-dev.crt` and is a lab identity. `tls_insecure = true` accepts any certificate and is a machine-in-the-middle hole; the client logs a warning when it is set.
 - Leave `allow_any_port` and `allow_any_hostname` off outside tests. List the ports and names you mean to expose.
 - Bind the server where you intend it to be reachable. The examples listen on `127.0.0.1` on purpose.
@@ -27,7 +27,7 @@ Pharos publishes a machine that is otherwise private. Treat a running server as 
 
 ## Hot reload
 
-A reload can change the token, the ACL, and heartbeat timers. Removing a port or hostname from the ACL closes that published listener even if a client registered it earlier. It cannot change where the process listens. `quic_bind`, `tls_bind`, `http.bind`, `https.bind`, `metrics_bind`, `tcp_bind_ip`, certificate files (including optional `https.cert_file` / `https.key_file`), `auth.mode`, and the client CA stay as they were at startup; restart the process to apply them. That includes turning metrics on or moving `metrics_bind`. A bad config file does not replace the settings that are already running.
+A reload can change the accepted token set (`token` and `auth.tokens`), the ACL, and heartbeat timers. Removing a port or hostname from the ACL closes that published listener even if a client registered it earlier. It cannot change where the process listens. `quic_bind`, `tls_bind`, `http.bind`, `https.bind`, `metrics_bind`, `tcp_bind_ip`, certificate files (including optional `https.cert_file` / `https.key_file`), `auth.mode`, and the client CA stay as they were at startup; restart the process to apply them. That includes turning metrics on or moving `metrics_bind`. A bad config file does not replace the settings that are already running.
 
 The client can add, remove, and retarget tunnels on the existing control connection. A new server address, token, transport, or auth mode is not applied to that connection. The next automatic reconnect reads them from the config file. Set `reconnect.enabled = false` to keep dialing with the settings from process start until you restart the client. Reconnect does not splice visitor sockets back together; those connections end when the control session ends.
 
@@ -46,10 +46,10 @@ The client can add, remove, and retarget tunnels on the existing control connect
 | Threat | 0.1 behavior |
 |---|---|
 | Anonymous tunnel | Rejected. `AuthFail`, then the connection closes. |
-| Stolen token, `token` mode | Full use of the ACL until you change the token. Reloading the file picks up a new token for later handshakes. |
+| Stolen token, `token` mode | Full use of the ACL until you remove that secret from `token` / `auth.tokens`. Reloading the file updates the accepted set for later handshakes. |
 | Stolen token, `token+mtls` | Useless without a certificate signed by the configured client CA. |
 | Client certificate from another CA | Handshake fails. No tunnel is registered. |
-| Guessing the token | Same error string for every failure. The compare does not return early on the raw secret. |
+| Guessing the token | Same error string for every failure. Every configured secret is hashed and compared; the match index is not leaked by an early return on the raw strings. |
 | Unsolicited public port | Not bound. Ports are bound only after a successful register, and accept starts only after `SessionReady`. |
 | Oversized frame | Rejected before the payload is buffered past 1 MiB. |
 | Connection exhaustion | Per-client and global tunnel and stream caps. Extra `RegisterTunnel` frames get `RegisterFail`. Extra public connections are closed. See `[limits]`. |

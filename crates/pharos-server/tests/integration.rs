@@ -1227,3 +1227,148 @@ timeout_secs = 45
     assert!(status.success(), "server exit status: {status}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_token_accepts_primary_and_list_entries() {
+    let id = identity();
+    let raw = format!(
+        r#"
+token = "primary-token"
+dev_ephemeral_cert = true
+tcp_bind_ip = "127.0.0.1"
+tls_bind = "127.0.0.1:0"
+[auth]
+tokens = ["list-alpha", "list-beta"]
+[acl]
+allow_any_port = true
+[heartbeat]
+interval_secs = 15
+timeout_secs = 45
+"#
+    );
+    let mut config = ServerConfig::parse_toml(&raw).expect("server toml");
+    config.cert_pem = Some(id.cert.clone());
+    config.key_pem = Some(id.key.clone());
+    config.dev_ephemeral_cert = false;
+    let server = pharos_server::spawn(config).await.expect("spawn server");
+    let addr = server.tls_addr.expect("tls");
+
+    for token in ["primary-token", "list-alpha", "list-beta"] {
+        let config = client_config(token, addr, "tls", &id.cert, "", SLOW_HEARTBEAT);
+        let mut client = pharos_client::spawn(config).await.unwrap();
+        let events = until_settled(&mut client).await;
+        assert!(
+            matches!(events.last(), Some(ClientEvent::Ready)),
+            "token {token} should authenticate: {events:?}"
+        );
+        client.shutdown().await;
+    }
+
+    let config = client_config("wrong-token", addr, "tls", &id.cert, "", SLOW_HEARTBEAT);
+    let mut client = pharos_client::spawn(config).await.unwrap();
+    let events = until_settled(&mut client).await;
+    match events.last() {
+        Some(ClientEvent::SessionEnded { error: Some(error) }) => {
+            assert!(
+                error.contains("authentication failed"),
+                "unexpected error: {error}"
+            );
+        }
+        other => panic!("expected auth failure, got {other:?}"),
+    }
+    client.shutdown().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_token_hot_reload_replaces_accepted_set() {
+    let id = identity();
+    let dir = std::env::temp_dir().join(format!(
+        "pharos-token-reload-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("server.toml");
+    let initial = r#"
+token = "old-token"
+dev_ephemeral_cert = true
+tcp_bind_ip = "127.0.0.1"
+tls_bind = "127.0.0.1:0"
+[acl]
+allow_any_port = true
+[heartbeat]
+interval_secs = 15
+timeout_secs = 45
+"#;
+    std::fs::write(&path, initial).unwrap();
+    let mut config = ServerConfig::load_path(&path).expect("load server");
+    config.cert_pem = Some(id.cert.clone());
+    config.key_pem = Some(id.key.clone());
+    config.dev_ephemeral_cert = false;
+    let server = pharos_server::spawn(config).await.expect("spawn server");
+    let addr = server.tls_addr.expect("tls");
+
+    let config = client_config("old-token", addr, "tls", &id.cert, "", SLOW_HEARTBEAT);
+    let mut client = pharos_client::spawn(config).await.unwrap();
+    let events = until_settled(&mut client).await;
+    assert!(
+        matches!(events.last(), Some(ClientEvent::Ready)),
+        "old token before reload: {events:?}"
+    );
+    client.shutdown().await;
+
+    let updated = r#"
+token = "new-token"
+dev_ephemeral_cert = true
+tcp_bind_ip = "127.0.0.1"
+tls_bind = "127.0.0.1:0"
+[auth]
+tokens = ["also-new"]
+[acl]
+allow_any_port = true
+[heartbeat]
+interval_secs = 15
+timeout_secs = 45
+"#;
+    let tmp = dir.join("server.toml.tmp");
+    std::fs::write(&tmp, updated).unwrap();
+    std::fs::rename(&tmp, &path).unwrap();
+
+    // Reload polls about every 400ms; wait until old token is rejected.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    let mut old_rejected = false;
+    while tokio::time::Instant::now() < deadline {
+        let config = client_config("old-token", addr, "tls", &id.cert, "", SLOW_HEARTBEAT);
+        let mut client = pharos_client::spawn(config).await.unwrap();
+        let events = until_settled(&mut client).await;
+        client.shutdown().await;
+        if matches!(
+            events.last(),
+            Some(ClientEvent::SessionEnded { error: Some(error) })
+                if error.contains("authentication failed")
+        ) {
+            old_rejected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(old_rejected, "old token should fail after reload");
+
+    for token in ["new-token", "also-new"] {
+        let config = client_config(token, addr, "tls", &id.cert, "", SLOW_HEARTBEAT);
+        let mut client = pharos_client::spawn(config).await.unwrap();
+        let events = until_settled(&mut client).await;
+        assert!(
+            matches!(events.last(), Some(ClientEvent::Ready)),
+            "token {token} after reload: {events:?}"
+        );
+        client.shutdown().await;
+    }
+
+    server.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

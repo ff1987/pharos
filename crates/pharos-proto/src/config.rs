@@ -69,6 +69,10 @@ impl std::fmt::Display for AuthMode {
 #[serde(deny_unknown_fields, default)]
 pub struct ServerAuthConfig {
     pub mode: AuthMode,
+    /// Additional accepted pre-shared tokens. Combined with the top-level
+    /// `token` (when non-empty) into one accepted set. Any match authenticates.
+    #[serde(default)]
+    pub tokens: Vec<String>,
     /// PEM trust anchor for client certificates. Required when `mode` is
     /// `mtls` or `token+mtls`. Changing this or `mode` needs a process restart;
     /// the TLS verifier is built at startup.
@@ -82,6 +86,7 @@ impl Default for ServerAuthConfig {
     fn default() -> Self {
         Self {
             mode: AuthMode::Token,
+            tokens: Vec::new(),
             client_ca_file: None,
             client_ca_pem: None,
         }
@@ -347,8 +352,11 @@ pub struct HttpsBind {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    /// Shared secret. Required for `auth.mode` `token` and `token+mtls`.
-    /// May be empty when `mode` is `mtls`. Never logged.
+    /// Shared secret. For `auth.mode` `token` and `token+mtls`, at least one
+    /// of this field or `auth.tokens` must be non-empty. May be empty when
+    /// `mode` is `mtls`, or when `auth.tokens` alone supplies the secrets.
+    /// Never logged.
+    #[serde(default)]
     pub token: String,
     /// UDP address for the QUIC control listener. Omit to disable QUIC.
     #[serde(default)]
@@ -421,14 +429,26 @@ impl ServerConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.auth.mode.requires_token() && self.token.is_empty() {
+        if self.auth.mode.requires_token() && self.accepted_tokens().is_empty() {
             return Err(ConfigError::Invalid(
-                "token is required and must not be empty when auth.mode is token or token+mtls"
+                "token or auth.tokens is required and must not be empty when auth.mode is token or token+mtls"
                     .into(),
             ));
         }
         if self.token.len() > crate::buf::MAX_STRING {
             return Err(ConfigError::Invalid("token is too long".into()));
+        }
+        for (idx, extra) in self.auth.tokens.iter().enumerate() {
+            if extra.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "auth.tokens[{idx}] must not be empty"
+                )));
+            }
+            if extra.len() > crate::buf::MAX_STRING {
+                return Err(ConfigError::Invalid(format!(
+                    "auth.tokens[{idx}] is too long"
+                )));
+            }
         }
         if self.auth.mode.requires_client_cert()
             && self.auth.client_ca_file.is_none()
@@ -505,6 +525,22 @@ impl ServerConfig {
         }
         validate_heartbeat(&self.heartbeat)?;
         Ok(())
+    }
+
+    /// Accepted PSK set: non-empty top-level `token` plus every `auth.tokens` entry.
+    /// Order is primary first, then list order. Duplicates are kept as configured;
+    /// comparison still matches any one of them.
+    pub fn accepted_tokens(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.token.is_empty() {
+            out.push(self.token.clone());
+        }
+        for token in &self.auth.tokens {
+            if !token.is_empty() {
+                out.push(token.clone());
+            }
+        }
+        out
     }
 
     pub fn quic_addr(&self) -> Result<Option<SocketAddr>, ConfigError> {
@@ -787,6 +823,26 @@ pub fn tokens_equal(expected: &str, presented: &str) -> bool {
     left.ct_eq(&right).into()
 }
 
+/// Return true if `presented` matches any configured secret.
+///
+/// Every candidate is hashed and compared so the match index is not leaked by
+/// an early return on the raw strings. An empty accepted list never matches.
+pub fn token_accepted(accepted: &[String], presented: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    use subtle::ConstantTimeEq;
+    if accepted.is_empty() {
+        return false;
+    }
+    let presented_digest = Sha256::digest(presented.as_bytes());
+    let mut matched = false;
+    for expected in accepted {
+        let left = Sha256::digest(expected.as_bytes());
+        let eq: bool = left.ct_eq(&presented_digest).into();
+        matched |= eq;
+    }
+    matched
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,6 +1007,66 @@ mod tests {
         let cfg = ClientConfig::parse_toml(toml).expect("udp tunnel");
         assert_eq!(cfg.tunnels[0].kind, TunnelKind::Udp);
         assert_eq!(cfg.tunnels[0].remote_port, 5353);
+    }
+
+    #[test]
+    fn multi_token_union_accepts_primary_and_list() {
+        let toml = r#"
+            token = "primary"
+            tls_bind = "127.0.0.1:7600"
+            dev_ephemeral_cert = true
+            [auth]
+            tokens = ["alpha", "beta"]
+        "#;
+        let cfg = ServerConfig::parse_toml(toml).expect("multi token");
+        let accepted = cfg.accepted_tokens();
+        assert!(accepted.contains(&"primary".to_string()));
+        assert!(accepted.contains(&"alpha".to_string()));
+        assert!(accepted.contains(&"beta".to_string()));
+        assert_eq!(accepted.len(), 3);
+        assert!(token_accepted(&accepted, "primary"));
+        assert!(token_accepted(&accepted, "alpha"));
+        assert!(token_accepted(&accepted, "beta"));
+        assert!(!token_accepted(&accepted, "wrong"));
+    }
+
+    #[test]
+    fn tokens_list_alone_is_enough_when_token_empty() {
+        let toml = r#"
+            token = ""
+            tls_bind = "127.0.0.1:7600"
+            dev_ephemeral_cert = true
+            [auth]
+            tokens = ["only-list"]
+        "#;
+        let cfg = ServerConfig::parse_toml(toml).expect("tokens only");
+        assert_eq!(cfg.accepted_tokens(), vec!["only-list".to_string()]);
+    }
+
+    #[test]
+    fn empty_token_and_empty_tokens_rejected_in_token_mode() {
+        let toml = r#"
+            token = ""
+            tls_bind = "127.0.0.1:7600"
+            dev_ephemeral_cert = true
+            [auth]
+            tokens = []
+        "#;
+        let err = ServerConfig::parse_toml(toml).unwrap_err();
+        assert!(err.to_string().contains("token"), "{err}");
+    }
+
+    #[test]
+    fn empty_entry_in_tokens_is_rejected() {
+        let toml = r#"
+            token = "ok"
+            tls_bind = "127.0.0.1:7600"
+            dev_ephemeral_cert = true
+            [auth]
+            tokens = ["good", ""]
+        "#;
+        let err = ServerConfig::parse_toml(toml).unwrap_err();
+        assert!(err.to_string().contains("token"), "{err}");
     }
 
 }

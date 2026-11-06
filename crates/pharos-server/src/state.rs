@@ -150,7 +150,7 @@ pharos_throttle_events_total {throttle_events}
 
 pub struct AppState {
     pub auth_mode: AuthMode,
-    pub token: RwLock<String>,
+    pub tokens: RwLock<Vec<String>>,
     pub acl: RwLock<AclConfig>,
     pub heartbeat: RwLock<HeartbeatConfig>,
     pub limits: Arc<RwLock<LimitsConfig>>,

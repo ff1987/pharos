@@ -46,10 +46,10 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let interval_ms = heartbeat_ms(&app);
-    let token = app.token.read().expect("token").clone();
+    let tokens = app.tokens.read().expect("tokens").clone();
     let check_token = app.auth_mode.requires_token();
     let handshake =
-        match server_authenticate(&mut reader, &mut writer, &token, check_token, interval_ms).await
+        match server_authenticate(&mut reader, &mut writer, &tokens, check_token, interval_ms).await
         {
             Ok(handshake) => handshake,
             Err(ProtoError::AuthFailed(_)) => {
