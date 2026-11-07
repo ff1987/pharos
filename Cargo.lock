@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "rcgen",
@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",

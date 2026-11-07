@@ -4,7 +4,7 @@ Pharos is a self-hosted intranet tunnel. A `pharos-client` inside the private ne
 
 Pharos（灯塔）是自建的内网穿透：客户端从内网主动连出，把本机 TCP/UDP 和按 Host 区分的 HTTP 服务发布到你自己的服务器上。协议是自研的，不兼容 frp，也不是 mesh VPN。
 
-**Version 0.1.0.** That is the workspace version in `Cargo.toml`, the heading in [CHANGELOG.md](CHANGELOG.md), and the product line in [PROTOCOL.md](PROTOCOL.md) and [SECURITY.md](SECURITY.md).
+**Version 0.2.0.** That is the workspace version in `Cargo.toml`, the heading in [CHANGELOG.md](CHANGELOG.md), and the product line in [PROTOCOL.md](PROTOCOL.md) and [SECURITY.md](SECURITY.md).
 
 ## What it is not
 
@@ -52,12 +52,12 @@ Continuous integration has two paths, because this repository is hosted on Origi
 
 Origin does not execute `.github/workflows` by itself. The Actions workflow is still the cross-platform definition: each OS runs `scripts/ci.sh` and uploads `pharos-server` and `pharos-client`. A tag whose name starts with `v` also opens a GitHub Release with those binaries when the workflow runs on GitHub. Origin CI runs the same script on Linux and does not publish a release.
 
-Tag by hand after the versions match. Do not tag until `Cargo.toml` (`version = "0.1.0"`), the version line at the top of this file, and the `0.1.0` heading in `CHANGELOG.md` are the same.
+Tag by hand after the versions match. Do not tag until `Cargo.toml` (`version = "0.2.0"`), the version line at the top of this file, and the `0.2.0` heading in `CHANGELOG.md` are the same.
 
 ```bash
 cargo test --workspace --locked
-git tag -a v0.1.0 -m "Pharos 0.1.0"
-git push origin v0.1.0
+git tag -a v0.2.0 -m "Pharos 0.2.0"
+git push origin v0.2.0
 ```
 
 On Origin, the tag is the release. The GitHub Release job does not run there. Attach binaries from a local `cargo build --workspace --release --locked` if you need them next to the tag.

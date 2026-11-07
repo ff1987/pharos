@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-07
+
 - Management probes on `metrics_bind`: `GET /health` (liveness, always `200` while up) and `GET /ready` (`200` until drain, then `503`). Same listener as `/metrics`; unknown paths return `404`. No new bind key.
 - Multi-token auth: keep top-level `token`, add optional `auth.tokens = ["…", "…"]`. The accepted set is their union; any match returns `AuthOk`. Empty auth is still forbidden in `token` / `token+mtls`. Hot reload replaces the whole accepted set for later handshakes (no per-token ACL).
 
