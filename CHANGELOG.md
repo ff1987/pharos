@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Ops status on `metrics_bind`: `GET`/`HEAD` `/status` returns JSON (`ok`, `version`, `draining`, `sessions`, `tunnels`, `streams_active`, `http_hosts`, `tcp_ports`, `udp_ports`). Same optional `metrics_token` Bearer gate as `/metrics`. Stays `200` during drain (`draining: true`); readiness remains on `/ready`.
+- Metrics gauges: `pharos_sessions_active` (authenticated control sessions) and `pharos_http_hosts` (distinct HTTP route keys). No per-hostname label series.
+
 ## 0.2.1 — 2026-11-07
 
 - HTTP Host wildcards: clients may register a single-label pattern `*.example.com` (leading `*.` only). Request matching is exact first (case-insensitive), then the longest matching single-label wildcard. `*.example.com` matches `app.example.com` but not `a.b.example.com` or `example.com`. ACL `allow_hostnames` may list the same patterns; registration compares the tunnel hostname string, so a listed `*.example.com` permits that pattern, not every concrete name under it.

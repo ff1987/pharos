@@ -78,6 +78,8 @@ impl Shutdown {
 pub struct Metrics {
     pub auth_ok: AtomicU64,
     pub auth_fail: AtomicU64,
+    /// Authenticated control sessions currently connected.
+    pub sessions_active: AtomicU64,
     /// Tunnels accepted since process start.
     pub tunnels: AtomicU64,
     /// Tunnels registered by sessions that are still connected.
@@ -96,7 +98,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn render(&self) -> String {
+    pub fn render(&self, http_hosts: usize) -> String {
         format!(
             "\
 # HELP pharos_auth_success_total Sessions that presented a valid token
@@ -105,12 +107,18 @@ pharos_auth_success_total {auth_ok}
 # HELP pharos_auth_failure_total Sessions rejected for a bad token
 # TYPE pharos_auth_failure_total counter
 pharos_auth_failure_total {auth_fail}
+# HELP pharos_sessions_active Authenticated control sessions currently connected
+# TYPE pharos_sessions_active gauge
+pharos_sessions_active {sessions_active}
 # HELP pharos_tunnels_active Tunnels registered by connected clients
 # TYPE pharos_tunnels_active gauge
 pharos_tunnels_active {tunnels_active}
 # HELP pharos_tunnels_registered_total Tunnels accepted after ACL checks
 # TYPE pharos_tunnels_registered_total counter
 pharos_tunnels_registered_total {tunnels}
+# HELP pharos_http_hosts Distinct HTTP hostname / wildcard route keys
+# TYPE pharos_http_hosts gauge
+pharos_http_hosts {http_hosts}
 # HELP pharos_acl_denied_total Tunnel registrations rejected by ACL
 # TYPE pharos_acl_denied_total counter
 pharos_acl_denied_total {acl}
@@ -135,8 +143,10 @@ pharos_throttle_events_total {throttle_events}
 ",
             auth_ok = self.auth_ok.load(Ordering::Relaxed),
             auth_fail = self.auth_fail.load(Ordering::Relaxed),
+            sessions_active = self.sessions_active.load(Ordering::Relaxed),
             tunnels_active = self.tunnels_active.load(Ordering::Relaxed),
             tunnels = self.tunnels.load(Ordering::Relaxed),
+            http_hosts = http_hosts,
             acl = self.acl_deny.load(Ordering::Relaxed),
             opened = self.streams_opened.load(Ordering::Relaxed),
             active = self.streams_active.load(Ordering::Relaxed),
@@ -156,6 +166,10 @@ pub struct AppState {
     pub limits: Arc<RwLock<LimitsConfig>>,
     pub tcp_bind_ip: IpAddr,
     pub http_routes: Arc<RwLock<HashMap<String, HttpRouteGroup>>>,
+    /// Published TCP remote ports -> backend (listener) count.
+    pub tcp_ports: Arc<RwLock<HashMap<u16, usize>>>,
+    /// Published UDP remote ports -> backend (socket) count.
+    pub udp_ports: Arc<RwLock<HashMap<u16, usize>>>,
     pub http_advertise: Option<SocketAddr>,
     pub https_advertise: Option<SocketAddr>,
     pub metrics: Arc<Metrics>,
@@ -165,6 +179,121 @@ pub struct AppState {
     pub shutdown: Shutdown,
     /// Sessions that should re-check the ACL after a reload.
     pub acl_watchers: Mutex<Vec<mpsc::UnboundedSender<AclConfig>>>,
+}
+
+impl AppState {
+    pub fn render_metrics(&self) -> String {
+        let http_hosts = self.http_routes.read().expect("routes").len();
+        self.metrics.render(http_hosts)
+    }
+
+    /// Ops JSON for GET /status. Hostnames and ports only — no tokens or peers.
+    pub fn status_json(&self) -> String {
+        let version = env!("CARGO_PKG_VERSION");
+        let draining = self.shutdown.is_draining();
+        let sessions = self.metrics.sessions_active.load(Ordering::Relaxed);
+        let tunnels = self.metrics.tunnels_active.load(Ordering::Relaxed);
+        let streams_active = self.metrics.streams_active.load(Ordering::Relaxed);
+
+        let mut http_hosts: Vec<(String, usize)> = self
+            .http_routes
+            .read()
+            .expect("routes")
+            .iter()
+            .map(|(host, group)| (host.clone(), group.backends.len()))
+            .collect();
+        http_hosts.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut tcp_ports: Vec<(u16, usize)> = self
+            .tcp_ports
+            .read()
+            .expect("tcp_ports")
+            .iter()
+            .map(|(&port, &backends)| (port, backends))
+            .collect();
+        tcp_ports.sort_by_key(|(port, _)| *port);
+
+        let mut udp_ports: Vec<(u16, usize)> = self
+            .udp_ports
+            .read()
+            .expect("udp_ports")
+            .iter()
+            .map(|(&port, &backends)| (port, backends))
+            .collect();
+        udp_ports.sort_by_key(|(port, _)| *port);
+
+        let mut out = String::with_capacity(256);
+        out.push_str("{\n");
+        out.push_str("  \"ok\": true,\n");
+        out.push_str(&format!("  \"version\": \"{}\",\n", json_escape(version)));
+        out.push_str(&format!("  \"draining\": {},\n", if draining { "true" } else { "false" }));
+        out.push_str(&format!("  \"sessions\": {sessions},\n"));
+        out.push_str(&format!("  \"tunnels\": {tunnels},\n"));
+        out.push_str(&format!("  \"streams_active\": {streams_active},\n"));
+        out.push_str("  \"http_hosts\": [");
+        if http_hosts.is_empty() {
+            out.push(']');
+        } else {
+            out.push('\n');
+            for (i, (host, backends)) in http_hosts.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                out.push_str(&format!(
+                    "    {{\"host\": \"{}\", \"backends\": {backends}}}",
+                    json_escape(host)
+                ));
+            }
+            out.push_str("\n  ]");
+        }
+        out.push_str(",\n  \"tcp_ports\": [");
+        if tcp_ports.is_empty() {
+            out.push(']');
+        } else {
+            out.push('\n');
+            for (i, (port, backends)) in tcp_ports.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                out.push_str(&format!(
+                    "    {{\"port\": {port}, \"backends\": {backends}}}"
+                ));
+            }
+            out.push_str("\n  ]");
+        }
+        out.push_str(",\n  \"udp_ports\": [");
+        if udp_ports.is_empty() {
+            out.push_str("]\n}");
+        } else {
+            out.push('\n');
+            for (i, (port, backends)) in udp_ports.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                out.push_str(&format!(
+                    "    {{\"port\": {port}, \"backends\": {backends}}}"
+                ));
+            }
+            out.push_str("\n  ]\n}");
+        }
+        out
+    }
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// One client backend behind an HTTP hostname / wildcard key.
@@ -221,6 +350,49 @@ fn remove_http_backend(routes: &RwLock<HashMap<String, HttpRouteGroup>>, host: &
     }
 }
 
+fn add_port_backend(ports: &RwLock<HashMap<u16, usize>>, port: u16) {
+    let mut map = ports.write().expect("ports");
+    *map.entry(port).or_insert(0) += 1;
+}
+
+fn remove_port_backend(ports: &RwLock<HashMap<u16, usize>>, port: u16) {
+    let mut map = ports.write().expect("ports");
+    let empty = if let Some(count) = map.get_mut(&port) {
+        *count = count.saturating_sub(1);
+        *count == 0
+    } else {
+        false
+    };
+    if empty {
+        map.remove(&port);
+    }
+}
+
+fn unpublish_tunnel(
+    routes: &RwLock<HashMap<String, HttpRouteGroup>>,
+    tcp_ports: &RwLock<HashMap<u16, usize>>,
+    udp_ports: &RwLock<HashMap<u16, usize>>,
+    tunnel: &TrackedTunnel,
+) {
+    match tunnel.surface {
+        TunnelSurface::Http => {
+            if let (Some(host), Some(backend_id)) = (tunnel.host.as_ref(), tunnel.backend_id) {
+                remove_http_backend(routes, host, backend_id);
+            }
+        }
+        TunnelSurface::Tcp => remove_port_backend(tcp_ports, tunnel.remote_port),
+        TunnelSurface::Udp => remove_port_backend(udp_ports, tunnel.remote_port),
+    }
+}
+
+/// How a tracked tunnel is published on the public side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelSurface {
+    Http,
+    Tcp,
+    Udp,
+}
+
 pub struct TrackedTunnel {
     pub name: String,
     pub remote_port: u16,
@@ -228,26 +400,41 @@ pub struct TrackedTunnel {
     pub task: Option<JoinHandle<()>>,
     pub host: Option<String>,
     pub backend_id: Option<u64>,
+    pub surface: TunnelSurface,
 }
 
 pub struct SessionGuard {
     tracked: Mutex<HashMap<u32, TrackedTunnel>>,
     routes: Arc<RwLock<HashMap<String, HttpRouteGroup>>>,
+    tcp_ports: Arc<RwLock<HashMap<u16, usize>>>,
+    udp_ports: Arc<RwLock<HashMap<u16, usize>>>,
     metrics: Arc<Metrics>,
     tunnels: AtomicU32,
 }
 
 impl SessionGuard {
-    pub fn new(routes: Arc<RwLock<HashMap<String, HttpRouteGroup>>>, metrics: Arc<Metrics>) -> Self {
+    pub fn new(
+        routes: Arc<RwLock<HashMap<String, HttpRouteGroup>>>,
+        tcp_ports: Arc<RwLock<HashMap<u16, usize>>>,
+        udp_ports: Arc<RwLock<HashMap<u16, usize>>>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             tracked: Mutex::new(HashMap::new()),
             routes,
+            tcp_ports,
+            udp_ports,
             metrics,
             tunnels: AtomicU32::new(0),
         }
     }
 
     pub fn track(&self, id: u32, tunnel: TrackedTunnel) {
+        match tunnel.surface {
+            TunnelSurface::Tcp => add_port_backend(&self.tcp_ports, tunnel.remote_port),
+            TunnelSurface::Udp => add_port_backend(&self.udp_ports, tunnel.remote_port),
+            TunnelSurface::Http => {}
+        }
         self.tunnels.fetch_add(1, Ordering::Relaxed);
         self.metrics.tunnels_active.fetch_add(1, Ordering::Relaxed);
         self.tracked.lock().expect("tracked").insert(id, tunnel);
@@ -256,12 +443,10 @@ impl SessionGuard {
     /// Drop one tunnel. Returns its name when it was still tracked.
     pub fn release(&self, id: u32) -> Option<String> {
         let tunnel = self.tracked.lock().expect("tracked").remove(&id)?;
-        if let Some(task) = tunnel.task {
+        if let Some(ref task) = tunnel.task {
             task.abort();
         }
-        if let (Some(host), Some(backend_id)) = (&tunnel.host, tunnel.backend_id) {
-            remove_http_backend(&self.routes, host, backend_id);
-        }
+        unpublish_tunnel(&self.routes, &self.tcp_ports, &self.udp_ports, &tunnel);
         self.tunnels.fetch_sub(1, Ordering::Relaxed);
         self.metrics.tunnels_active.fetch_sub(1, Ordering::Relaxed);
         Some(tunnel.name)
@@ -296,12 +481,10 @@ impl Drop for SessionGuard {
             .fetch_sub(active, Ordering::Relaxed);
         let mut tracked = self.tracked.lock().expect("tracked");
         for (_, tunnel) in tracked.drain() {
-            if let Some(task) = tunnel.task {
+            if let Some(ref task) = tunnel.task {
                 task.abort();
             }
-            if let (Some(host), Some(backend_id)) = (tunnel.host.as_ref(), tunnel.backend_id) {
-                remove_http_backend(&self.routes, host, backend_id);
-            }
+            unpublish_tunnel(&self.routes, &self.tcp_ports, &self.udp_ports, &tunnel);
         }
     }
 }

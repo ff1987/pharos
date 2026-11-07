@@ -1123,6 +1123,155 @@ async fn metrics_without_token_still_allows_health() {
     server.shutdown().await.unwrap();
 }
 
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_endpoint_returns_json_shape() {
+    let id = identity();
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\nmetrics_bind = \"127.0.0.1:0\"\n[acl]\nallow_any_port = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let metrics_addr = server.metrics_addr.expect("metrics");
+
+    let (status, ct, body) = metrics_http(metrics_addr, "GET", "/status").await;
+    assert_eq!(status, 200, "status status");
+    assert!(
+        ct.starts_with("application/json"),
+        "content-type: {ct}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&body).expect("status json");
+    assert_eq!(value["ok"], true);
+    assert!(value["version"].as_str().unwrap_or("").len() > 0);
+    assert_eq!(value["draining"], false);
+    assert!(value["sessions"].as_u64().is_some());
+    assert!(value["tunnels"].as_u64().is_some());
+    assert!(value["streams_active"].as_u64().is_some());
+    assert!(value["http_hosts"].as_array().is_some());
+    assert!(value["tcp_ports"].as_array().is_some());
+    assert!(value["udp_ports"].as_array().is_some());
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "HEAD", "/status").await;
+    assert_eq!(status, 200, "status HEAD");
+    assert!(body.is_empty(), "HEAD body: {body:?}");
+
+    let (status, _ct, metrics_body) = metrics_http(metrics_addr, "GET", "/metrics").await;
+    assert_eq!(status, 200);
+    assert!(
+        metrics_body.contains("pharos_sessions_active"),
+        "missing sessions gauge: {metrics_body}"
+    );
+    assert!(
+        metrics_body.contains("pharos_http_hosts"),
+        "missing http_hosts gauge: {metrics_body}"
+    );
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_requires_metrics_token_when_set() {
+    let id = identity();
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\nmetrics_bind = \"127.0.0.1:0\"\nmetrics_token = \"ops-secret\"\n[acl]\nallow_any_port = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let metrics_addr = server.metrics_addr.expect("metrics");
+
+    let (status, _ct, www, body) =
+        metrics_http_raw(metrics_addr, "GET", "/status", None).await;
+    assert_eq!(status, 401, "status without bearer");
+    assert_eq!(www, "Bearer");
+    assert_eq!(body, "unauthorized\n");
+
+    let (status, ct, body) =
+        metrics_http_auth(metrics_addr, "GET", "/status", Some("ops-secret")).await;
+    assert_eq!(status, 200);
+    assert!(ct.starts_with("application/json"), "{ct}");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("status json");
+    assert_eq!(value["ok"], true);
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_lists_registered_http_host_and_draining_flag() {
+    let id = identity();
+    let origin = spawn_hello().await;
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\nmetrics_bind = \"127.0.0.1:0\"\n[http]\nbind = \"127.0.0.1:0\"\n[acl]\nallow_any_hostname = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let metrics_addr = server.metrics_addr.expect("metrics");
+    let tunnels = format!(
+        "[[tunnels]]\nname = \"web\"\ntype = \"http\"\nlocal = \"{origin}\"\nhostname = \"demo.local\"\n"
+    );
+    let config = client_config(
+        "correct-token",
+        server.tls_addr.expect("tls"),
+        "tls",
+        &id.cert,
+        &tunnels,
+        SLOW_HEARTBEAT,
+    );
+    let mut client = pharos_client::spawn(config).await.unwrap();
+    let events = until_settled(&mut client).await;
+    assert!(
+        matches!(events.last(), Some(ClientEvent::Ready)),
+        "{events:?}"
+    );
+
+    // Wait briefly for the HTTP route to publish after SessionReady.
+    let mut found = false;
+    for _ in 0..40 {
+        let (status, _ct, body) = metrics_http(metrics_addr, "GET", "/status").await;
+        assert_eq!(status, 200);
+        let value: serde_json::Value = serde_json::from_str(&body).expect("status json");
+        assert_eq!(value["draining"], false);
+        assert!(value["sessions"].as_u64().unwrap_or(0) >= 1);
+        if let Some(hosts) = value["http_hosts"].as_array() {
+            if hosts.iter().any(|h| {
+                h["host"].as_str() == Some("demo.local")
+                    && h["backends"].as_u64().unwrap_or(0) >= 1
+            }) {
+                found = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(found, "http_hosts missing demo.local");
+
+    let (status, _ct, metrics_body) = metrics_http(metrics_addr, "GET", "/metrics").await;
+    assert_eq!(status, 200);
+    assert!(
+        metrics_body
+            .lines()
+            .any(|line| line.starts_with("pharos_http_hosts ") && !line.ends_with(" 0")),
+        "pharos_http_hosts should be >0: {metrics_body}"
+    );
+
+    server.shutdown.begin_drain();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "GET", "/status").await;
+    assert_eq!(status, 200, "status during drain stays 200");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("status json");
+    assert_eq!(value["draining"], true);
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "GET", "/ready").await;
+    assert_eq!(status, 503, "ready during drain");
+    assert_eq!(body, "not ready\n");
+
+    client.shutdown().await;
+    server.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_hot_reload_adds_a_tcp_tunnel() {
     let id = identity();

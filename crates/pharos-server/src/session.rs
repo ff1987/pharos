@@ -16,7 +16,7 @@ use tracing::Instrument;
 use crate::state::{
     bridge_public, bridge_udp_public, next_http_backend_id, AppState, DataPlane, HttpBackend,
     HttpPending, HttpRouteGroup, Pending, SessionGuard, Shutdown, TcpPending, TrackedTunnel,
-    UdpPending,
+    TunnelSurface, UdpPending,
 };
 
 pub struct SessionCtx {
@@ -71,9 +71,30 @@ where
         "authenticated"
     );
     let span = tracing::info_span!("session", %peer, session = handshake.session_id);
+    let _session = SessionPermit::acquire(&app);
     serve_authenticated(reader, writer, peer, app, plane_of, allow_data, handshake)
         .instrument(span)
         .await
+}
+
+/// Holds `sessions_active` for one authenticated control session.
+struct SessionPermit {
+    metrics: Arc<crate::state::Metrics>,
+}
+
+impl SessionPermit {
+    fn acquire(app: &AppState) -> Self {
+        app.metrics.sessions_active.fetch_add(1, Ordering::Relaxed);
+        Self {
+            metrics: app.metrics.clone(),
+        }
+    }
+}
+
+impl Drop for SessionPermit {
+    fn drop(&mut self) {
+        self.metrics.sessions_active.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 pub async fn serve_authenticated<R, W>(
@@ -102,7 +123,12 @@ where
         plane,
         ready_tx,
         ready_rx,
-        guard: SessionGuard::new(app.http_routes.clone(), app.metrics.clone()),
+        guard: SessionGuard::new(
+            app.http_routes.clone(),
+            app.tcp_ports.clone(),
+            app.udp_ports.clone(),
+            app.metrics.clone(),
+        ),
         pending: Mutex::new(Pending {
             tcp: Vec::new(),
             http: Vec::new(),
@@ -541,6 +567,7 @@ fn insert_http(ctx: &SessionCtx, host: &str, tunnel_id: u32, name: String) {
             task: None,
             host: Some(host.to_string()),
             backend_id: Some(backend_id),
+            surface: TunnelSurface::Http,
         },
     );
 }
@@ -596,6 +623,7 @@ fn spawn_tcp(
             task: Some(task),
             host: None,
             backend_id: None,
+            surface: TunnelSurface::Tcp,
         },
     );
 }
@@ -672,6 +700,7 @@ fn spawn_udp(
             task: Some(task),
             host: None,
             backend_id: None,
+            surface: TunnelSurface::Udp,
         },
     );
 }

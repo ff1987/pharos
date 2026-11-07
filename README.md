@@ -220,20 +220,41 @@ metrics_bind = "127.0.0.1:9099"
 | Path | Methods | Meaning |
 |---|---|---|
 | `/metrics` | GET, HEAD | Prometheus text exposition |
+| `/status` | GET, HEAD | Ops JSON snapshot: version, drain flag, session/tunnel/stream counts, registered HTTP hosts and TCP/UDP ports (no tokens or peer IPs) |
 | `/health` | GET, HEAD | Liveness. Always `200` + `ok` while the process is up, including during graceful drain |
 | `/ready` | GET, HEAD | Readiness. `200` + `ready` while accepting work; `503` + `not ready` once drain starts |
+
+`GET /status` example shape:
+
+```json
+{
+  "ok": true,
+  "version": "0.2.1",
+  "draining": false,
+  "sessions": 1,
+  "tunnels": 2,
+  "streams_active": 0,
+  "http_hosts": [{"host": "demo.local", "backends": 1}],
+  "tcp_ports": [{"port": 2222, "backends": 1}],
+  "udp_ports": []
+}
+```
+
+During drain, `/status` stays `200` with `"draining": true`; use `/ready` for readiness probes.
 
 `GET /metrics` includes, among others:
 
 | Series | Kind | Meaning |
 |---|---|---|
+| `pharos_sessions_active` | gauge | Authenticated control sessions currently connected |
 | `pharos_tunnels_active` | gauge | Tunnels held by connected clients |
+| `pharos_http_hosts` | gauge | Distinct HTTP hostname / wildcard route keys |
 | `pharos_auth_failure_total` | counter | Bad tokens and failed QUIC/TLS handshakes |
 | `pharos_streams_opened_total` | counter | Data streams opened toward a client |
 | `pharos_bytes_in_total` | counter | Bytes read from public connections |
 | `pharos_bytes_out_total` | counter | Bytes written to public connections |
 
-When `metrics_token` is unset or empty, the scrape and probes are open: bind `metrics_bind` to a trusted address (localhost or a management network). When `metrics_token` is set, every request on that listener must present `Authorization: Bearer <token>`; missing or wrong credentials return `401` with `WWW-Authenticate: Bearer` and body `unauthorized`. Use a secret distinct from the tunnel PSK. Enabling the token is recommended when the bind is not loopback-only. The exposition does not contain tokens or certificate material. Changing `metrics_bind` still needs a restart; `metrics_token` hot-reloads.
+When `metrics_token` is unset or empty, the scrape, `/status`, and probes are open: bind `metrics_bind` to a trusted address (localhost or a management network). When `metrics_token` is set, every request on that listener must present `Authorization: Bearer <token>`; missing or wrong credentials return `401` with `WWW-Authenticate: Bearer` and body `unauthorized`. Use a secret distinct from the tunnel PSK. Enabling the token is recommended when the bind is not loopback-only. The exposition and `/status` do not contain tokens or certificate material (registered hostnames and ports are included as ops surface). Changing `metrics_bind` still needs a restart; `metrics_token` hot-reloads.
 
 ## Tests
 

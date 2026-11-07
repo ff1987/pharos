@@ -23,4 +23,5 @@ clap = { workspace = true }
 [dev-dependencies]
 pharos-client = { path = "../pharos-client" }
 pharos-proto = { path = "../pharos-proto" }
+serde_json = { workspace = true }
 tokio = { workspace = true }

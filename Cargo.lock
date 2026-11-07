@@ -770,6 +770,7 @@ dependencies = [
  "pharos-proto",
  "quinn",
  "rustls",
+ "serde_json",
  "tokio",
  "tokio-rustls",
  "tracing",

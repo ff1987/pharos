@@ -1,39 +1,28 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use pharos_proto::tokens_equal;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::state::{Metrics, Shutdown};
+use crate::state::{AppState, Shutdown};
 
-pub async fn metrics_loop(
-    listener: TcpListener,
-    metrics: Arc<Metrics>,
-    metrics_token: Arc<RwLock<String>>,
-    shutdown: Shutdown,
-) {
+pub async fn metrics_loop(listener: TcpListener, app: Arc<AppState>, shutdown: Shutdown) {
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
             accepted = listener.accept() => {
                 let Ok((sock, _)) = accepted else { break };
-                let metrics = metrics.clone();
-                let metrics_token = metrics_token.clone();
+                let app = app.clone();
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    serve_one(sock, metrics, metrics_token, shutdown).await;
+                    serve_one(sock, app, shutdown).await;
                 });
             }
         }
     }
 }
 
-async fn serve_one(
-    mut sock: TcpStream,
-    metrics: Arc<Metrics>,
-    metrics_token: Arc<RwLock<String>>,
-    shutdown: Shutdown,
-) {
+async fn serve_one(mut sock: TcpStream, app: Arc<AppState>, shutdown: Shutdown) {
     let mut buf = [0u8; 2048];
     let n = match tokio::time::timeout(std::time::Duration::from_secs(2), sock.read(&mut buf)).await
     {
@@ -65,10 +54,7 @@ async fn serve_one(
 
     // Auth before path dispatch so a missing/wrong token never reveals whether
     // the path exists. Empty metrics_token leaves the listener open.
-    let required = metrics_token
-        .read()
-        .expect("metrics_token")
-        .clone();
+    let required = app.metrics_token.read().expect("metrics_token").clone();
     if !required.is_empty() && !bearer_authorized(&req, &required) {
         let _ = write_response_maybe_body(
             &mut sock,
@@ -84,11 +70,23 @@ async fn serve_one(
 
     match path.as_str() {
         "/metrics" => {
-            let body = metrics.render();
+            let body = app.render_metrics();
             let _ = write_response_maybe_body(
                 &mut sock,
                 200,
                 "text/plain; version=0.0.4",
+                &body,
+                head,
+                &[],
+            )
+            .await;
+        }
+        "/status" => {
+            let body = app.status_json();
+            let _ = write_response_maybe_body(
+                &mut sock,
+                200,
+                "application/json",
                 &body,
                 head,
                 &[],

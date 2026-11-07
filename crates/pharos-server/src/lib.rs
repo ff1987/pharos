@@ -230,6 +230,8 @@ pub async fn spawn(config: ServerConfig) -> anyhow::Result<ServerHandle> {
         limits: Arc::new(RwLock::new(config.limits.clone())),
         tcp_bind_ip,
         http_routes: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        tcp_ports: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        udp_ports: Arc::new(RwLock::new(std::collections::HashMap::new())),
         http_advertise: http_bound,
         https_advertise: https_bound,
         metrics: Arc::new(Metrics::default()),
@@ -325,11 +327,10 @@ async fn serve(
         });
     }
     if let Some(listener) = metrics_listener {
-        let metrics = app.metrics.clone();
-        let metrics_token = app.metrics_token.clone();
+        let app = app.clone();
         let shutdown = shutdown.clone();
         tasks.spawn(async move {
-            metrics_srv::metrics_loop(listener, metrics, metrics_token, shutdown).await;
+            metrics_srv::metrics_loop(listener, app, shutdown).await;
         });
     }
     if let Some(path) = config_path {
