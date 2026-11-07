@@ -233,6 +233,7 @@ pub async fn spawn(config: ServerConfig) -> anyhow::Result<ServerHandle> {
         http_advertise: http_bound,
         https_advertise: https_bound,
         metrics: Arc::new(Metrics::default()),
+        metrics_token: Arc::new(RwLock::new(config.metrics_token.clone())),
         shutdown: shutdown.clone(),
         acl_watchers: Mutex::new(Vec::new()),
     });
@@ -325,9 +326,10 @@ async fn serve(
     }
     if let Some(listener) = metrics_listener {
         let metrics = app.metrics.clone();
+        let metrics_token = app.metrics_token.clone();
         let shutdown = shutdown.clone();
         tasks.spawn(async move {
-            metrics_srv::metrics_loop(listener, metrics, shutdown).await;
+            metrics_srv::metrics_loop(listener, metrics, metrics_token, shutdown).await;
         });
     }
     if let Some(path) = config_path {
@@ -437,12 +439,13 @@ async fn reload_loop(
                 seen = Some(bytes);
                 baseline.warn_if_restart_required(&cfg);
                 *app.tokens.write().expect("tokens") = cfg.accepted_tokens();
+                *app.metrics_token.write().expect("metrics_token") = cfg.metrics_token.clone();
                 *app.acl.write().expect("acl") = cfg.acl.clone();
                 *app.heartbeat.write().expect("heartbeat") = cfg.heartbeat;
                 *app.limits.write().expect("limits") = cfg.limits;
                 let mut watchers = app.acl_watchers.lock().expect("acl watchers");
                 watchers.retain(|tx| tx.send(cfg.acl.clone()).is_ok());
-                tracing::info!("reloaded tokens, ACL, heartbeat, and limits");
+                tracing::info!("reloaded tokens, metrics_token, ACL, heartbeat, and limits");
             }
             Err(err) => {
                 tracing::error!(error = %err, "config reload failed; keeping the previous settings");

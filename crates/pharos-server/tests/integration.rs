@@ -884,8 +884,34 @@ async fn metrics_endpoint_exposes_auth_failure_counter() {
 
 
 async fn metrics_http(addr: SocketAddr, method: &str, path: &str) -> (u16, String, String) {
+    metrics_http_auth(addr, method, path, None).await
+}
+
+async fn metrics_http_auth(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+) -> (u16, String, String) {
+    let (status, content_type, _www, payload) =
+        metrics_http_raw(addr, method, path, bearer).await;
+    (status, content_type, payload)
+}
+
+async fn metrics_http_raw(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+) -> (u16, String, String, String) {
     let mut sock = TcpStream::connect(addr).await.unwrap();
-    let req = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let auth = match bearer {
+        Some(token) => format!("Authorization: Bearer {token}\r\n"),
+        None => String::new(),
+    };
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Connection: close\r\n\r\n"
+    );
     sock.write_all(req.as_bytes()).await.unwrap();
     let mut body = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut body))
@@ -903,12 +929,17 @@ async fn metrics_http(addr: SocketAddr, method: &str, path: &str) -> (u16, Strin
         .find(|line| line.to_ascii_lowercase().starts_with("content-type:"))
         .map(|line| line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string())
         .unwrap_or_default();
+    let www_authenticate = text
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("www-authenticate:"))
+        .map(|line| line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string())
+        .unwrap_or_default();
     let payload = text
         .split_once("\r\n\r\n")
         .or_else(|| text.split_once("\n\n"))
         .map(|(_, body)| body.to_string())
         .unwrap_or_default();
-    (status, content_type, payload)
+    (status, content_type, www_authenticate, payload)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -986,6 +1017,103 @@ async fn metrics_ready_goes_503_during_drain_while_health_stays_200() {
     server.shutdown().await.unwrap();
 }
 
+
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_token_rejects_missing_and_wrong_bearer() {
+    let id = identity();
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\nmetrics_bind = \"127.0.0.1:0\"\nmetrics_token = \"ops-secret\"\n[acl]\nallow_any_port = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let metrics_addr = server.metrics_addr.expect("metrics");
+
+    let (status, _ct, www, body) =
+        metrics_http_raw(metrics_addr, "GET", "/health", None).await;
+    assert_eq!(status, 401, "health without bearer");
+    assert_eq!(www, "Bearer");
+    assert_eq!(body, "unauthorized\n");
+
+    let (status, _ct, www, body) =
+        metrics_http_raw(metrics_addr, "GET", "/metrics", None).await;
+    assert_eq!(status, 401, "metrics without bearer");
+    assert_eq!(www, "Bearer");
+    assert_eq!(body, "unauthorized\n");
+
+    let (status, _ct, www, body) =
+        metrics_http_raw(metrics_addr, "GET", "/health", Some("wrong")).await;
+    assert_eq!(status, 401, "health wrong bearer");
+    assert_eq!(www, "Bearer");
+    assert_eq!(body, "unauthorized\n");
+
+    let (status, _ct, www, body) =
+        metrics_http_raw(metrics_addr, "GET", "/metrics", Some("wrong")).await;
+    assert_eq!(status, 401, "metrics wrong bearer");
+    assert_eq!(www, "Bearer");
+    assert_eq!(body, "unauthorized\n");
+
+    let (status, _ct, _www, body) =
+        metrics_http_raw(metrics_addr, "GET", "/nope", None).await;
+    assert_eq!(status, 401, "unknown path still 401 before path leak");
+    assert_eq!(body, "unauthorized\n");
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_token_accepts_correct_bearer() {
+    let id = identity();
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\nmetrics_bind = \"127.0.0.1:0\"\nmetrics_token = \"ops-secret\"\n[acl]\nallow_any_port = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let metrics_addr = server.metrics_addr.expect("metrics");
+
+    let (status, _ct, body) =
+        metrics_http_auth(metrics_addr, "GET", "/health", Some("ops-secret")).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "ok\n");
+
+    let (status, _ct, body) =
+        metrics_http_auth(metrics_addr, "HEAD", "/health", Some("ops-secret")).await;
+    assert_eq!(status, 200);
+    assert!(body.is_empty());
+
+    let (status, ct, body) =
+        metrics_http_auth(metrics_addr, "GET", "/metrics", Some("ops-secret")).await;
+    assert_eq!(status, 200);
+    assert!(ct.starts_with("text/plain"), "{ct}");
+    assert!(body.contains("pharos_tunnels_active"), "{body}");
+
+    let (status, _ct, body) =
+        metrics_http_auth(metrics_addr, "GET", "/ready", Some("ops-secret")).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "ready\n");
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_without_token_still_allows_health() {
+    let id = identity();
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\nmetrics_bind = \"127.0.0.1:0\"\n[acl]\nallow_any_port = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let metrics_addr = server.metrics_addr.expect("metrics");
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "GET", "/health").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "ok\n");
+
+    server.shutdown().await.unwrap();
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_hot_reload_adds_a_tcp_tunnel() {

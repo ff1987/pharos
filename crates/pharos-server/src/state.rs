@@ -159,6 +159,9 @@ pub struct AppState {
     pub http_advertise: Option<SocketAddr>,
     pub https_advertise: Option<SocketAddr>,
     pub metrics: Arc<Metrics>,
+    /// Optional Bearer secret for the metrics_bind admin HTTP surface.
+    /// Empty means the listener is open. Hot-reloaded with config.
+    pub metrics_token: Arc<RwLock<String>>,
     pub shutdown: Shutdown,
     /// Sessions that should re-check the ACL after a reload.
     pub acl_watchers: Mutex<Vec<mpsc::UnboundedSender<AclConfig>>>,

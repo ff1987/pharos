@@ -10,10 +10,14 @@ tls_bind = "127.0.0.1:7600"
 dev_ephemeral_cert = true
 tcp_bind_ip = "127.0.0.1"
 
-# Optional management HTTP listener (restart required). Serves /metrics,
-# /health (liveness), and /ready (readiness). Bind to localhost or a
-# management network — there is no auth on this port.
+# Optional management HTTP listener. Serves /metrics, /health (liveness),
+# and /ready (readiness). metrics_bind itself needs a restart to enable or
+# move. Optional metrics_token requires Authorization: Bearer <token> on
+# every request to that listener; leave unset/empty for the open trust
+# model (bind to localhost or a management network). metrics_token is
+# hot-reloaded and is independent of the tunnel PSK.
 # metrics_bind = "127.0.0.1:9099"
+# metrics_token = "change-me-ops-secret"
 
 
 [http]

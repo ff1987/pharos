@@ -396,6 +396,13 @@ pub struct ServerConfig {
     /// Optional `host:port` that serves a Prometheus text exposition.
     #[serde(default)]
     pub metrics_bind: Option<String>,
+    /// Optional shared secret for the `metrics_bind` HTTP surface
+    /// (`/metrics`, `/health`, `/ready`). Empty or unset leaves the
+    /// listener open (bind to a trusted address). When set, every
+    /// request must present `Authorization: Bearer <token>`. Hot-reloaded.
+    /// Never logged. Independent of the tunnel PSK.
+    #[serde(default)]
+    pub metrics_token: String,
     /// PEM certificate supplied by tests or an embedding process.
     #[serde(skip)]
     pub cert_pem: Option<String>,
@@ -502,6 +509,9 @@ impl ServerConfig {
         }
         if let Some(metrics) = &self.metrics_bind {
             parse_socket_addr(metrics, "metrics_bind")?;
+        }
+        if self.metrics_token.len() > crate::buf::MAX_STRING {
+            return Err(ConfigError::Invalid("metrics_token is too long".into()));
         }
         self.tcp_bind_ip
             .parse::<std::net::IpAddr>()
@@ -1069,4 +1079,26 @@ mod tests {
         assert!(err.to_string().contains("token"), "{err}");
     }
 
+
+    #[test]
+    fn metrics_token_defaults_empty_and_parses() {
+        let toml = r#"
+            token = "t"
+            tls_bind = "127.0.0.1:7600"
+            dev_ephemeral_cert = true
+            metrics_bind = "127.0.0.1:9099"
+        "#;
+        let cfg = ServerConfig::parse_toml(toml).unwrap();
+        assert!(cfg.metrics_token.is_empty());
+
+        let toml = r#"
+            token = "t"
+            tls_bind = "127.0.0.1:7600"
+            dev_ephemeral_cert = true
+            metrics_bind = "127.0.0.1:9099"
+            metrics_token = "ops-secret"
+        "#;
+        let cfg = ServerConfig::parse_toml(toml).unwrap();
+        assert_eq!(cfg.metrics_token, "ops-secret");
+    }
 }

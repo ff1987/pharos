@@ -27,7 +27,7 @@ Pharos publishes a machine that is otherwise private. Treat a running server as 
 
 ## Hot reload
 
-A reload can change the accepted token set (`token` and `auth.tokens`), the ACL, and heartbeat timers. Removing a port or hostname from the ACL closes that published listener even if a client registered it earlier. It cannot change where the process listens. `quic_bind`, `tls_bind`, `http.bind`, `https.bind`, `metrics_bind`, `tcp_bind_ip`, certificate files (including optional `https.cert_file` / `https.key_file`), `auth.mode`, and the client CA stay as they were at startup; restart the process to apply them. That includes turning metrics on or moving `metrics_bind`. A bad config file does not replace the settings that are already running.
+A reload can change the accepted token set (`token` and `auth.tokens`), `metrics_token`, the ACL, and heartbeat timers. Removing a port or hostname from the ACL closes that published listener even if a client registered it earlier. It cannot change where the process listens. `quic_bind`, `tls_bind`, `http.bind`, `https.bind`, `metrics_bind`, `tcp_bind_ip`, certificate files (including optional `https.cert_file` / `https.key_file`), `auth.mode`, and the client CA stay as they were at startup; restart the process to apply them. That includes turning metrics on or moving `metrics_bind`. A bad config file does not replace the settings that are already running.
 
 The client can add, remove, and retarget tunnels on the existing control connection. A new server address, token, transport, or auth mode is not applied to that connection. The next automatic reconnect reads them from the config file. Set `reconnect.enabled = false` to keep dialing with the settings from process start until you restart the client. Reconnect does not splice visitor sockets back together; those connections end when the control session ends.
 
@@ -39,7 +39,7 @@ The client can add, remove, and retarget tunnels on the existing control connect
 
 ## Metrics
 
-`metrics_bind` is off by default. The same unauthenticated TCP HTTP listener serves `GET /metrics`, `GET /health`, and `GET /ready` (HEAD is accepted too). It does not check the tunnel token. Anyone who can open that port can see tunnel counts, auth-failure counts, stream counts, and coarse byte totals, and can read liveness/readiness. Bind it to localhost or a management network, not the public tunnel address. The exposition does not include tokens, keys, or certificate bytes. Logs add `peer` and `tunnel` and likewise omit the token.
+`metrics_bind` is off by default. The same TCP HTTP listener serves `GET /metrics`, `GET /health`, and `GET /ready` (HEAD is accepted too). It does not check the tunnel PSK. When `metrics_token` is unset or empty, anyone who can open that port can see tunnel counts, auth-failure counts, stream counts, and coarse byte totals, and can read liveness/readiness — bind it to localhost or a management network, not the public tunnel address. When `metrics_token` is set, every request on that listener must present `Authorization: Bearer <token>` (missing or wrong yields `401` with `WWW-Authenticate: Bearer`); use a different secret from the tunnel PSK. Enabling `metrics_token` is recommended whenever the bind is not loopback-only. The exposition does not include tokens, keys, or certificate bytes. Logs add `peer` and `tunnel` and likewise omit secrets.
 
 ## Threat notes
 

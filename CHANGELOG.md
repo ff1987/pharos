@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Optional `metrics_token` on the server: when set, every request on `metrics_bind` (`/metrics`, `/health`, `/ready`) must present `Authorization: Bearer <token>` (401 + `WWW-Authenticate: Bearer` otherwise). Unset/empty keeps the previous open listener. Compared with the same constant-time digest path as tunnel tokens. Hot-reloaded; independent of the tunnel PSK. `metrics_bind` itself remains restart-only.
+
 ## 0.2.0 — 2026-11-07
 
 - Management probes on `metrics_bind`: `GET /health` (liveness, always `200` while up) and `GET /ready` (`200` until drain, then `503`). Same listener as `/metrics`; unknown paths return `404`. No new bind key.

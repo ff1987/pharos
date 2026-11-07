@@ -120,9 +120,9 @@ Server (see `examples/server.toml`):
 - `[http] bind` is the public HTTP listener. Without `[http]` and without `[https]`, `type = "http"` registrations fail.
 - `[https] bind` is an optional public HTTPS listener. The server terminates TLS there and routes by `Host` on the same table as `[http]`. Certificates default to the server `cert_file` / `key_file` (or `dev_ephemeral_cert`); set `https.cert_file` and `https.key_file` to override. The client still uses `type = "http"` with a plaintext local origin.
 - `tcp_bind_ip` is the address used for reverse TCP and UDP ports.
-- `metrics_bind` is off unless set. See [Metrics](#metrics).
+- `metrics_bind` is off unless set. Optional `metrics_token` requires Bearer auth on that listener. See [Metrics](#metrics).
 - `token` is the primary pre-shared secret. Optional `auth.tokens = ["…", "…"]` adds more accepted secrets; any match authenticates. The accepted set is the union of a non-empty `token` and every `auth.tokens` entry.
-- `[heartbeat]` closes a session that receives no frame for `timeout_secs`. The server re-reads the accepted token set, ACL, and heartbeat from the file every couple of seconds. Bind addresses stay as they were at startup.
+- `[heartbeat]` closes a session that receives no frame for `timeout_secs`. The server re-reads the accepted token set, `metrics_token`, ACL, and heartbeat from the file every couple of seconds. Bind addresses stay as they were at startup.
 
 Client (see `examples/client.toml`):
 
@@ -161,7 +161,7 @@ bash examples/gen-mtls-certs.sh
 
 Both processes re-read their config file about twice a second. A file that fails to parse is ignored and the previous settings stay in effect.
 
-The server applies a new accepted token set (`token` plus `auth.tokens`), the ACL (`allow_ports`, `allow_hostnames`, and the `allow_any_*` flags), and heartbeat intervals without dropping live sessions. A port or hostname removed from the ACL stops accepting new connections immediately. Adding a port to the ACL does not publish it by itself; the client still has to register that mapping.
+The server applies a new accepted token set (`token` plus `auth.tokens`), `metrics_token`, the ACL (`allow_ports`, `allow_hostnames`, and the `allow_any_*` flags), and heartbeat intervals without dropping live sessions. A port or hostname removed from the ACL stops accepting new connections immediately. Adding a port to the ACL does not publish it by itself; the client still has to register that mapping.
 
 The client applies tunnel list edits on the open control connection: new `[[tunnels]]` entries are registered, removed entries are unregistered, and a changed `local` address is used for the next stream. Changing `remote_port`, `hostname`, or `type` unregisters the old mapping and registers the new one. `server`, `token`, `transport`, and `auth.mode` stay as they were for the current session. The next automatic reconnect reads them from the file. Set `reconnect.enabled = false` when a live session must ignore the file until you restart the process.
 
@@ -204,6 +204,8 @@ Leave `metrics_bind` unset and the server does not open a metrics port. Set it t
 
 ```toml
 metrics_bind = "127.0.0.1:9099"
+# Optional. When set, every request needs Authorization: Bearer <token>.
+# metrics_token = "change-me-ops-secret"
 ```
 
 | Path | Methods | Meaning |
@@ -222,7 +224,7 @@ metrics_bind = "127.0.0.1:9099"
 | `pharos_bytes_in_total` | counter | Bytes read from public connections |
 | `pharos_bytes_out_total` | counter | Bytes written to public connections |
 
-The scrape and probes have no authentication of their own. Bind `metrics_bind` to a trusted address (localhost or a management network). The exposition does not contain the token or certificate material. Changing `metrics_bind` still needs a restart.
+When `metrics_token` is unset or empty, the scrape and probes are open: bind `metrics_bind` to a trusted address (localhost or a management network). When `metrics_token` is set, every request on that listener must present `Authorization: Bearer <token>`; missing or wrong credentials return `401` with `WWW-Authenticate: Bearer` and body `unauthorized`. Use a secret distinct from the tunnel PSK. Enabling the token is recommended when the bind is not loopback-only. The exposition does not contain tokens or certificate material. Changing `metrics_bind` still needs a restart; `metrics_token` hot-reloads.
 
 ## Tests
 
