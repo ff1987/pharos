@@ -1,6 +1,6 @@
 # Pharos protocol
 
-Version 1. This document is the wire contract for `pharos-server` and `pharos-client` 0.2.0. The protocol is original. It does not speak frp, rathole, chisel, or WireGuard.
+Version 1. This document is the wire contract for `pharos-server` and `pharos-client` 0.2.1. The protocol is original. It does not speak frp, rathole, chisel, or WireGuard.
 
 ## Transport
 

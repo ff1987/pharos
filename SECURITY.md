@@ -2,7 +2,7 @@
 
 Pharos publishes a machine that is otherwise private. Treat a running server as a remote-access service.
 
-## What 0.2.0 guarantees
+## What 0.2.1 guarantees
 
 - There is no anonymous mode. `auth.mode` is `token` (default), `mtls`, or `token+mtls`.
 - `token` and `token+mtls` require at least one pre-shared secret from the top-level `token` and/or `auth.tokens`. An empty accepted set is rejected at startup for those modes. Each presented secret is hashed with SHA-256 and compared against every configured digest without an early exit on the raw strings.

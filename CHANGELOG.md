@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.1 — 2026-11-07
+
 - HTTP Host wildcards: clients may register a single-label pattern `*.example.com` (leading `*.` only). Request matching is exact first (case-insensitive), then the longest matching single-label wildcard. `*.example.com` matches `app.example.com` but not `a.b.example.com` or `example.com`. ACL `allow_hostnames` may list the same patterns; registration compares the tunnel hostname string, so a listed `*.example.com` permits that pattern, not every concrete name under it.
 - Same-hostname load balancing: multiple clients may register the same exact host or wildcard key. Public HTTP/HTTPS requests round-robin across backends. If `open()` fails on the chosen backend, the server tries the remaining backends once around the ring before returning `503`. Disconnect removes only that backend; sticky sessions are not implemented.
 - Optional `metrics_token` on the server: when set, every request on `metrics_bind` (`/metrics`, `/health`, `/ready`) must present `Authorization: Bearer <token>` (401 + `WWW-Authenticate: Bearer` otherwise). Unset/empty keeps the previous open listener. Compared with the same constant-time digest path as tunnel tokens. Hot-reloaded; independent of the tunnel PSK. `metrics_bind` itself remains restart-only.

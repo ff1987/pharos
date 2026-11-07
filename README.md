@@ -4,7 +4,7 @@ Pharos is a self-hosted intranet tunnel. A `pharos-client` inside the private ne
 
 Pharos（灯塔）是自建的内网穿透：客户端从内网主动连出，把本机 TCP/UDP 和按 Host 区分的 HTTP 服务发布到你自己的服务器上。协议是自研的，不兼容 frp，也不是 mesh VPN。
 
-**Version 0.2.0.** That is the workspace version in `Cargo.toml`, the heading in [CHANGELOG.md](CHANGELOG.md), and the product line in [PROTOCOL.md](PROTOCOL.md) and [SECURITY.md](SECURITY.md).
+**Version 0.2.1.** That is the workspace version in `Cargo.toml`, the heading in [CHANGELOG.md](CHANGELOG.md), and the product line in [PROTOCOL.md](PROTOCOL.md) and [SECURITY.md](SECURITY.md).
 
 ## What it is not
 
@@ -25,6 +25,16 @@ Pharos（灯塔）是自建的内网穿透：客户端从内网主动连出，�
 
 ## Install
 
+### From a GitHub Release
+
+Prebuilt `pharos-server` and `pharos-client` binaries for Linux, macOS, and Windows ship with each tagged release:
+
+https://github.com/ff1987/pharos/releases
+
+Grab the assets for [v0.2.1](https://github.com/ff1987/pharos/releases/tag/v0.2.1) (or the latest release), make them executable on Unix, and place them on your `PATH`.
+
+### From source
+
 Rust 1.88 or newer (stable is the intended toolchain; `rust-toolchain.toml` selects stable). From a checkout:
 
 ```bash
@@ -35,6 +45,8 @@ The binaries are `target/release/pharos-server` and `target/release/pharos-clien
 
 ## Build and release
 
+Public source of truth: **[github.com/ff1987/pharos](https://github.com/ff1987/pharos)**. Issues, PRs, Actions, and Releases live there.
+
 The locked check and the release build are one script:
 
 ```bash
@@ -43,24 +55,19 @@ bash scripts/ci.sh
 
 That runs `cargo test --workspace --locked`, then `cargo build --workspace --release --locked`.
 
-Continuous integration has two paths, because this repository is hosted on Origin and is not a GitHub mirror:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on GitHub Actions for `ubuntu-latest`, `macos-latest`, and `windows-latest`. Each OS job runs `scripts/ci.sh` and uploads `pharos-server` and `pharos-client`. A tag whose name starts with `v` also opens a [GitHub Release](https://github.com/ff1987/pharos/releases) with those binaries.
 
-| Path | Where it runs | Platforms |
-|---|---|---|
-| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | GitHub Actions, and on Origin after the Depot or Buildkite app is connected from the repository Apps tab | `ubuntu-latest`, `macos-latest`, `windows-latest` |
-| [`origin.ci.ts`](origin.ci.ts) | Origin CI, which reads only this file | Linux, image `rust:bookworm` |
+An optional [`origin.ci.ts`](origin.ci.ts) may run the same script on Origin Linux; it does not publish Releases. Prefer pushing tags to GitHub so Actions can attach the cross-platform assets.
 
-Origin does not execute `.github/workflows` by itself. The Actions workflow is still the cross-platform definition: each OS runs `scripts/ci.sh` and uploads `pharos-server` and `pharos-client`. A tag whose name starts with `v` also opens a GitHub Release with those binaries when the workflow runs on GitHub. Origin CI runs the same script on Linux and does not publish a release.
-
-Tag by hand after the versions match. Do not tag until `Cargo.toml` (`version = "0.2.0"`), the version line at the top of this file, and the `0.2.0` heading in `CHANGELOG.md` are the same.
+Tag by hand after the versions match. Do not tag until `Cargo.toml` (`version = "0.2.1"`), the version line at the top of this file, and the `0.2.1` heading in `CHANGELOG.md` are the same.
 
 ```bash
 cargo test --workspace --locked
-git tag -a v0.2.0 -m "Pharos 0.2.0"
-git push origin v0.2.0
+git tag -a v0.2.1 -m "Pharos 0.2.1"
+git push origin v0.2.1
 ```
 
-On Origin, the tag is the release. The GitHub Release job does not run there. Attach binaries from a local `cargo build --workspace --release --locked` if you need them next to the tag.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for a short contributor checklist.
 
 ## Loopback demo
 
@@ -241,6 +248,7 @@ The integration tests bring up a real server and client on `127.0.0.1` and cover
 - [PROTOCOL.md](PROTOCOL.md) — frame bytes
 - [SECURITY.md](SECURITY.md) — what the transport does and does not protect
 - [CHANGELOG.md](CHANGELOG.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md) — build, test, and PRs
 - [docs/design.md](docs/design.md) — product design notes
 
 ## License
