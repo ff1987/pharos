@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Management probes on `metrics_bind`: `GET /health` (liveness, always `200` while up) and `GET /ready` (`200` until drain, then `503`). Same listener as `/metrics`; unknown paths return `404`. No new bind key.
 - Multi-token auth: keep top-level `token`, add optional `auth.tokens = ["…", "…"]`. The accepted set is their union; any match returns `AuthOk`. Empty auth is still forbidden in `token` / `token+mtls`. Hot reload replaces the whole accepted set for later handshakes (no per-token ACL).
 
 - UDP reverse tunnels: client `type = "udp"` with `local` and `remote_port`. The server binds UDP on `tcp_bind_ip:remote_port`, opens one association stream per public peer, and forwards length-prefixed datagrams. `allow_ports` / `allow_any_port` apply to UDP as well as TCP. Idle associations time out after 60 seconds.

@@ -882,6 +882,111 @@ async fn metrics_endpoint_exposes_auth_failure_counter() {
     server.shutdown().await.unwrap();
 }
 
+
+async fn metrics_http(addr: SocketAddr, method: &str, path: &str) -> (u16, String, String) {
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    let req = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    sock.write_all(req.as_bytes()).await.unwrap();
+    let mut body = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut body))
+        .await
+        .expect("metrics http timed out")
+        .unwrap();
+    let text = String::from_utf8_lossy(&body).into_owned();
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let content_type = text
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("content-type:"))
+        .map(|line| line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string())
+        .unwrap_or_default();
+    let payload = text
+        .split_once("\r\n\r\n")
+        .or_else(|| text.split_once("\n\n"))
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
+    (status, content_type, payload)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_bind_serves_health_ready_and_404() {
+    let id = identity();
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\nmetrics_bind = \"127.0.0.1:0\"\n[acl]\nallow_any_port = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let metrics_addr = server.metrics_addr.expect("metrics");
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "GET", "/health").await;
+    assert_eq!(status, 200, "health status");
+    assert_eq!(body, "ok\n");
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "HEAD", "/health").await;
+    assert_eq!(status, 200, "health HEAD status");
+    assert!(body.is_empty(), "HEAD body should be empty: {body:?}");
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "GET", "/ready").await;
+    assert_eq!(status, 200, "ready status");
+    assert_eq!(body, "ready\n");
+
+    let (status, ct, body) = metrics_http(metrics_addr, "GET", "/metrics").await;
+    assert_eq!(status, 200, "metrics status");
+    assert!(
+        ct.starts_with("text/plain"),
+        "metrics content-type: {ct}"
+    );
+    assert!(
+        body.contains("pharos_tunnels_active"),
+        "metrics body missing gauge: {body}"
+    );
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "GET", "/nope").await;
+    assert_eq!(status, 404, "unknown path status");
+    assert_eq!(body, "not found\n");
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_ready_goes_503_during_drain_while_health_stays_200() {
+    let id = identity();
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\nmetrics_bind = \"127.0.0.1:0\"\n[acl]\nallow_any_port = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let metrics_addr = server.metrics_addr.expect("metrics");
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "GET", "/ready").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "ready\n");
+
+    server.shutdown.begin_drain();
+    // Drain is signalled asynchronously via watch; give the listener a tick.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "GET", "/ready").await;
+    assert_eq!(status, 503, "ready during drain");
+    assert_eq!(body, "not ready\n");
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "GET", "/health").await;
+    assert_eq!(status, 200, "health during drain");
+    assert_eq!(body, "ok\n");
+
+    let (status, _ct, body) = metrics_http(metrics_addr, "HEAD", "/ready").await;
+    assert_eq!(status, 503, "ready HEAD during drain");
+    assert!(body.is_empty());
+
+    server.shutdown().await.unwrap();
+}
+
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_hot_reload_adds_a_tcp_tunnel() {
     let id = identity();

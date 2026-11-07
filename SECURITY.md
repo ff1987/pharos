@@ -39,7 +39,7 @@ The client can add, remove, and retarget tunnels on the existing control connect
 
 ## Metrics
 
-`metrics_bind` is off by default. The text endpoint does not check the tunnel token. Anyone who can open that port can see tunnel counts, auth-failure counts, stream counts, and coarse byte totals. Bind it to localhost or a management network, not the public tunnel address. The exposition does not include tokens, keys, or certificate bytes. Logs add `peer` and `tunnel` and likewise omit the token.
+`metrics_bind` is off by default. The same unauthenticated TCP HTTP listener serves `GET /metrics`, `GET /health`, and `GET /ready` (HEAD is accepted too). It does not check the tunnel token. Anyone who can open that port can see tunnel counts, auth-failure counts, stream counts, and coarse byte totals, and can read liveness/readiness. Bind it to localhost or a management network, not the public tunnel address. The exposition does not include tokens, keys, or certificate bytes. Logs add `peer` and `tunnel` and likewise omit the token.
 
 ## Threat notes
 

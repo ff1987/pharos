@@ -200,13 +200,19 @@ Session and forward paths carry `peer` and, once a tunnel is chosen, `tunnel` (t
 
 ## Metrics
 
-Leave `metrics_bind` unset and the server does not open a metrics port. Set it to scrape Prometheus text:
+Leave `metrics_bind` unset and the server does not open a metrics port. Set it to scrape Prometheus text and to expose process probes on the same listener (no separate bind):
 
 ```toml
 metrics_bind = "127.0.0.1:9099"
 ```
 
-`GET /metrics` then includes, among others:
+| Path | Methods | Meaning |
+|---|---|---|
+| `/metrics` | GET, HEAD | Prometheus text exposition |
+| `/health` | GET, HEAD | Liveness. Always `200` + `ok` while the process is up, including during graceful drain |
+| `/ready` | GET, HEAD | Readiness. `200` + `ready` while accepting work; `503` + `not ready` once drain starts |
+
+`GET /metrics` includes, among others:
 
 | Series | Kind | Meaning |
 |---|---|---|
@@ -216,7 +222,7 @@ metrics_bind = "127.0.0.1:9099"
 | `pharos_bytes_in_total` | counter | Bytes read from public connections |
 | `pharos_bytes_out_total` | counter | Bytes written to public connections |
 
-The scrape has no authentication of its own. Bind it to a trusted address. It does not contain the token or certificate material.
+The scrape and probes have no authentication of their own. Bind `metrics_bind` to a trusted address (localhost or a management network). The exposition does not contain the token or certificate material. Changing `metrics_bind` still needs a restart.
 
 ## Tests
 

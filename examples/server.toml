@@ -10,6 +10,12 @@ tls_bind = "127.0.0.1:7600"
 dev_ephemeral_cert = true
 tcp_bind_ip = "127.0.0.1"
 
+# Optional management HTTP listener (restart required). Serves /metrics,
+# /health (liveness), and /ready (readiness). Bind to localhost or a
+# management network — there is no auth on this port.
+# metrics_bind = "127.0.0.1:9099"
+
+
 [http]
 bind = "127.0.0.1:7680"
 
