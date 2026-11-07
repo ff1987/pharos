@@ -101,6 +101,8 @@ curl -sS -H 'Host: demo.local' http://127.0.0.1:7680/
 
 `demo.local` does not need a DNS record. The server routes on the `Host` header. Any other name gets `404`.
 
+HTTP hostnames may also be a single-label wildcard such as `*.example.com` (leading `*.` only). Matching order is exact host first, then the longest matching wildcard. `*.example.com` serves `app.example.com` but not `a.b.example.com`. Several clients may register the same hostname (exact or the same wildcard key); requests round-robin across those backends, and a failed `open()` walks the ring once before `503`.
+
 To verify the certificate instead of skipping it, point the client at the `pharos-dev.crt` the server writes next to `examples/server.toml`:
 
 ```toml
@@ -116,7 +118,7 @@ Server (see `examples/server.toml`):
 
 - `quic_bind` and `tls_bind` are independent. Set either or both. QUIC is UDP, TLS is TCP, so they can share a port number.
 - `cert_file` and `key_file` are the production identity. `dev_ephemeral_cert = true` is only for a lab.
-- `[acl]` lists `allow_ports` and `allow_hostnames`. `allow_ports` covers both TCP and UDP `remote_port` values. If the list is empty and the matching `allow_any_*` flag is false, that class of tunnel is denied.
+- `[acl]` lists `allow_ports` and `allow_hostnames`. `allow_ports` covers both TCP and UDP `remote_port` values. `allow_hostnames` accepts exact names and `*.suffix` patterns; registration matches the tunnel hostname string case-insensitively (listing `*.example.com` does not by itself allow registering `app.example.com`). If the list is empty and the matching `allow_any_*` flag is false, that class of tunnel is denied.
 - `[http] bind` is the public HTTP listener. Without `[http]` and without `[https]`, `type = "http"` registrations fail.
 - `[https] bind` is an optional public HTTPS listener. The server terminates TLS there and routes by `Host` on the same table as `[http]`. Certificates default to the server `cert_file` / `key_file` (or `dev_ephemeral_cert`); set `https.cert_file` and `https.key_file` to override. The client still uses `type = "http"` with a plaintext local origin.
 - `tcp_bind_ip` is the address used for reverse TCP and UDP ports.
@@ -130,7 +132,7 @@ Client (see `examples/client.toml`):
 - `transport` is `auto` (default), `quic`, or `tls`.
 - `ca_file` trusts the server certificate. `tls_insecure = true` does not.
 - `[auth] mode` is `token` (default), `mtls`, or `token+mtls`. See [mTLS](#mtls) below.
-- Each `[[tunnels]]` entry is `type = "tcp"` or `type = "udp"` with `local` and `remote_port`, or `type = "http"` with `local` and `hostname`. `local` is `host:port`, for example `127.0.0.1:22`. UDP opens one association stream per public peer and closes it after 60 seconds idle.
+- Each `[[tunnels]]` entry is `type = "tcp"` or `type = "udp"` with `local` and `remote_port`, or `type = "http"` with `local` and `hostname`. `hostname` is an exact name or a single-label wildcard `*.example.com`. `local` is `host:port`, for example `127.0.0.1:22`. UDP opens one association stream per public peer and closes it after 60 seconds idle.
 - The client reconnects with exponential backoff unless `reconnect.enabled = false`.
 
 A TCP or UDP tunnel with `remote_port = 0` asks for an ephemeral port. The server only allows that when `allow_any_port = true`, and it reports the chosen port in the log.
@@ -232,7 +234,7 @@ When `metrics_token` is unset or empty, the scrape and probes are open: bind `me
 cargo test --workspace
 ```
 
-The integration tests bring up a real server and client on `127.0.0.1` and cover rejected tokens, accepted tokens (including multi-token and token-set hot reload), TCP and UDP echo over TLS and over QUIC, ACL denials, HTTP/HTTPS host routing (including an unknown host), and an idle heartbeat timeout.
+The integration tests bring up a real server and client on `127.0.0.1` and cover rejected tokens, accepted tokens (including multi-token and token-set hot reload), TCP and UDP echo over TLS and over QUIC, ACL denials, HTTP/HTTPS host routing (exact, unknown host, single-label wildcards, exact-over-wildcard, and same-hostname round-robin), and an idle heartbeat timeout.
 
 ## Further reading
 

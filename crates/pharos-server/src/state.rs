@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use bytes::Bytes;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -155,7 +155,7 @@ pub struct AppState {
     pub heartbeat: RwLock<HeartbeatConfig>,
     pub limits: Arc<RwLock<LimitsConfig>>,
     pub tcp_bind_ip: IpAddr,
-    pub http_routes: Arc<RwLock<HashMap<String, HttpRoute>>>,
+    pub http_routes: Arc<RwLock<HashMap<String, HttpRouteGroup>>>,
     pub http_advertise: Option<SocketAddr>,
     pub https_advertise: Option<SocketAddr>,
     pub metrics: Arc<Metrics>,
@@ -167,10 +167,58 @@ pub struct AppState {
     pub acl_watchers: Mutex<Vec<mpsc::UnboundedSender<AclConfig>>>,
 }
 
+/// One client backend behind an HTTP hostname / wildcard key.
 #[derive(Clone)]
-pub struct HttpRoute {
+pub struct HttpBackend {
+    pub id: u64,
     pub plane: DataPlane,
     pub tunnel_id: u32,
+}
+
+/// Backends registered for one hostname key, with round-robin cursor.
+pub struct HttpRouteGroup {
+    pub backends: Vec<HttpBackend>,
+    pub rr: AtomicUsize,
+}
+
+impl HttpRouteGroup {
+    pub fn new(backend: HttpBackend) -> Self {
+        Self {
+            backends: vec![backend],
+            rr: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn snapshot_backends(&self) -> Vec<HttpBackend> {
+        self.backends.clone()
+    }
+
+    /// Next start index for round-robin (wraps at `len`).
+    pub fn next_start(&self, len: usize) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        self.rr.fetch_add(1, Ordering::Relaxed) % len
+    }
+}
+
+static NEXT_HTTP_BACKEND_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_http_backend_id() -> u64 {
+    NEXT_HTTP_BACKEND_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn remove_http_backend(routes: &RwLock<HashMap<String, HttpRouteGroup>>, host: &str, backend_id: u64) {
+    let mut map = routes.write().expect("routes");
+    let empty = if let Some(group) = map.get_mut(host) {
+        group.backends.retain(|b| b.id != backend_id);
+        group.backends.is_empty()
+    } else {
+        false
+    };
+    if empty {
+        map.remove(host);
+    }
 }
 
 pub struct TrackedTunnel {
@@ -179,17 +227,18 @@ pub struct TrackedTunnel {
     pub hostname: String,
     pub task: Option<JoinHandle<()>>,
     pub host: Option<String>,
+    pub backend_id: Option<u64>,
 }
 
 pub struct SessionGuard {
     tracked: Mutex<HashMap<u32, TrackedTunnel>>,
-    routes: Arc<RwLock<HashMap<String, HttpRoute>>>,
+    routes: Arc<RwLock<HashMap<String, HttpRouteGroup>>>,
     metrics: Arc<Metrics>,
     tunnels: AtomicU32,
 }
 
 impl SessionGuard {
-    pub fn new(routes: Arc<RwLock<HashMap<String, HttpRoute>>>, metrics: Arc<Metrics>) -> Self {
+    pub fn new(routes: Arc<RwLock<HashMap<String, HttpRouteGroup>>>, metrics: Arc<Metrics>) -> Self {
         Self {
             tracked: Mutex::new(HashMap::new()),
             routes,
@@ -210,8 +259,8 @@ impl SessionGuard {
         if let Some(task) = tunnel.task {
             task.abort();
         }
-        if let Some(host) = &tunnel.host {
-            self.routes.write().expect("routes").remove(host);
+        if let (Some(host), Some(backend_id)) = (&tunnel.host, tunnel.backend_id) {
+            remove_http_backend(&self.routes, host, backend_id);
         }
         self.tunnels.fetch_sub(1, Ordering::Relaxed);
         self.metrics.tunnels_active.fetch_sub(1, Ordering::Relaxed);
@@ -250,8 +299,8 @@ impl Drop for SessionGuard {
             if let Some(task) = tunnel.task {
                 task.abort();
             }
-            if let Some(host) = tunnel.host {
-                self.routes.write().expect("routes").remove(&host);
+            if let (Some(host), Some(backend_id)) = (tunnel.host.as_ref(), tunnel.backend_id) {
+                remove_http_backend(&self.routes, host, backend_id);
             }
         }
     }

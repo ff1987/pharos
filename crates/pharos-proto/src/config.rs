@@ -288,8 +288,11 @@ pub struct AclConfig {
     /// both tunnel kinds; TCP and UDP may still share a port number.
     #[serde(default)]
     pub allow_ports: Vec<u16>,
-    /// HTTP hostnames a client may claim. Empty denies every name unless
-    /// [`Self::allow_any_hostname`] is set. Matching is case-insensitive.
+    /// HTTP hostnames or `*.suffix` patterns a client may claim. Empty denies
+    /// every name unless [`Self::allow_any_hostname`] is set. Registration
+    /// checks compare the tunnel hostname string case-insensitively against
+    /// this list (a listed `*.example.com` permits registering that pattern,
+    /// not every concrete name under it).
     #[serde(default)]
     pub allow_hostnames: Vec<String>,
     /// Permit any TCP or UDP port, including ephemeral `remote_port = 0`.
@@ -318,6 +321,8 @@ impl AclConfig {
         if self.allow_any_hostname {
             return true;
         }
+        // Registration-side check: compare the tunnel hostname / pattern
+        // string itself, not expanded request Host values.
         self.allow_hostnames
             .iter()
             .any(|allowed| allowed.eq_ignore_ascii_case(hostname))
@@ -758,9 +763,9 @@ impl ClientConfig {
                             tunnel.name
                         )));
                     }
-                    if tunnel.hostname.len() > 253 {
+                    if let Err(reason) = crate::hostname::normalize_http_hostname(&tunnel.hostname) {
                         return Err(ConfigError::Invalid(format!(
-                            "tunnel '{}': hostname is too long",
+                            "tunnel '{}': {reason}",
                             tunnel.name
                         )));
                     }
@@ -900,13 +905,16 @@ mod tests {
         assert!(!acl.permits_hostname("demo.local"));
         let acl = AclConfig {
             allow_ports: vec![2222],
-            allow_hostnames: vec!["Demo.Local".into()],
+            allow_hostnames: vec!["Demo.Local".into(), "*.Example.COM".into()],
             allow_any_port: false,
             allow_any_hostname: false,
         };
         assert!(acl.permits_port(2222));
         assert!(!acl.permits_port(2223));
         assert!(acl.permits_hostname("demo.local"));
+        assert!(acl.permits_hostname("*.example.com"));
+        // Concrete names are not implied by a listed wildcard pattern.
+        assert!(!acl.permits_hostname("app.example.com"));
     }
 
     #[test]

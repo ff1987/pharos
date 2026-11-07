@@ -14,6 +14,7 @@ mod config;
 mod error;
 mod frame;
 mod handshake;
+mod hostname;
 mod mux;
 mod proxy;
 mod tlsutil;
@@ -25,6 +26,10 @@ pub use config::{
     token_accepted, tokens_equal, AclConfig, AuthMode, ClientAuthConfig, ClientConfig, ConfigError,
     HeartbeatConfig, HttpBind, HttpsBind, LimitsConfig, LogConfig, LogFormat, ReconnectConfig,
     ServerAuthConfig, ServerConfig, ShutdownConfig, TransportMode, TunnelConfig, TunnelKind,
+};
+pub use hostname::{
+    is_wildcard_hostname, normalize_http_hostname, resolve_hostname_key,
+    single_label_wildcard_matches,
 };
 pub use error::ProtoError;
 pub use frame::{

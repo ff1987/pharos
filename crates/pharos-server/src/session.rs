@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use pharos_proto::{
-    code, empty_frame, server_authenticate, ErrorBody, Frame, FrameType, Heartbeat, HeartbeatAck,
-    MuxHandle, ProtoError, RegisterFail, RegisterOk, RegisterTunnel, ServerHandshake, TunnelKind,
-    Unregister, UnregisterOk,
+    code, empty_frame, normalize_http_hostname, server_authenticate, ErrorBody, Frame, FrameType,
+    Heartbeat, HeartbeatAck, MuxHandle, ProtoError, RegisterFail, RegisterOk, RegisterTunnel,
+    ServerHandshake, TunnelKind, Unregister, UnregisterOk,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -14,8 +14,9 @@ use tokio::sync::watch;
 use tracing::Instrument;
 
 use crate::state::{
-    bridge_public, bridge_udp_public, AppState, DataPlane, HttpPending, HttpRoute, Pending,
-    SessionGuard, Shutdown, TcpPending, TrackedTunnel, UdpPending,
+    bridge_public, bridge_udp_public, next_http_backend_id, AppState, DataPlane, HttpBackend,
+    HttpPending, HttpRouteGroup, Pending, SessionGuard, Shutdown, TcpPending, TrackedTunnel,
+    UdpPending,
 };
 
 pub struct SessionCtx {
@@ -422,8 +423,13 @@ async fn register(ctx: &SessionCtx, request: RegisterTunnel) -> Frame {
                     "this server is not listening for HTTP or HTTPS".into(),
                 );
             }
-            let host = request.hostname.trim().to_ascii_lowercase();
-            if host.is_empty() || host.len() > 253 || !acl.permits_hostname(&host) {
+            let host = match normalize_http_hostname(&request.hostname) {
+                Ok(host) => host,
+                Err(reason) => {
+                    return fail(code::BAD_REQUEST, reason.into());
+                }
+            };
+            if !acl.permits_hostname(&host) {
                 ctx.app.metrics.acl_deny.fetch_add(1, Ordering::Relaxed);
                 tracing::info!(peer = %ctx.peer, tunnel = %request.name, %host, "acl denied hostname");
                 return fail(
@@ -431,12 +437,8 @@ async fn register(ctx: &SessionCtx, request: RegisterTunnel) -> Frame {
                     format!("hostname {host} is not in the ACL"),
                 );
             }
-            if hostname_taken(ctx, &host) {
-                return fail(
-                    code::BIND_FAILED,
-                    format!("hostname {host} is already registered"),
-                );
-            }
+            // Same hostname (exact or wildcard key) may be registered by
+            // multiple clients; public requests round-robin across backends.
             if *ctx.ready_rx.borrow() {
                 insert_http(ctx, &host, tunnel_id, request.name.clone());
             } else {
@@ -515,32 +517,21 @@ async fn register(ctx: &SessionCtx, request: RegisterTunnel) -> Frame {
     }
 }
 
-fn hostname_taken(ctx: &SessionCtx, host: &str) -> bool {
-    if ctx
-        .app
-        .http_routes
-        .read()
-        .expect("routes")
-        .contains_key(host)
-    {
-        return true;
-    }
-    ctx.pending
-        .lock()
-        .expect("pending")
-        .http
-        .iter()
-        .any(|pending| pending.host == host)
-}
-
 fn insert_http(ctx: &SessionCtx, host: &str, tunnel_id: u32, name: String) {
-    ctx.app.http_routes.write().expect("routes").insert(
-        host.to_string(),
-        HttpRoute {
-            plane: ctx.plane.clone(),
-            tunnel_id,
-        },
-    );
+    let backend_id = next_http_backend_id();
+    let backend = HttpBackend {
+        id: backend_id,
+        plane: ctx.plane.clone(),
+        tunnel_id,
+    };
+    {
+        let mut map = ctx.app.http_routes.write().expect("routes");
+        if let Some(group) = map.get_mut(host) {
+            group.backends.push(backend);
+        } else {
+            map.insert(host.to_string(), HttpRouteGroup::new(backend));
+        }
+    }
     ctx.guard.track(
         tunnel_id,
         TrackedTunnel {
@@ -549,6 +540,7 @@ fn insert_http(ctx: &SessionCtx, host: &str, tunnel_id: u32, name: String) {
             hostname: host.to_string(),
             task: None,
             host: Some(host.to_string()),
+            backend_id: Some(backend_id),
         },
     );
 }
@@ -603,6 +595,7 @@ fn spawn_tcp(
             hostname: String::new(),
             task: Some(task),
             host: None,
+            backend_id: None,
         },
     );
 }
@@ -678,6 +671,7 @@ fn spawn_udp(
             hostname: String::new(),
             task: Some(task),
             host: None,
+            backend_id: None,
         },
     );
 }
@@ -698,16 +692,6 @@ async fn publish(ctx: &SessionCtx) {
         spawn_udp(ctx, udp.socket, udp.tunnel_id, udp.name, udp.remote_port);
     }
     for http in pending.http {
-        if ctx
-            .app
-            .http_routes
-            .read()
-            .expect("routes")
-            .contains_key(&http.host)
-        {
-            tracing::warn!(host = %http.host, "dropping http tunnel; hostname taken");
-            continue;
-        }
         insert_http(ctx, &http.host, http.tunnel_id, http.name);
     }
 }

@@ -1,12 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use pharos_proto::resolve_hostname_key;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::Instrument;
 
-use crate::state::{bridge_public, AppState, Shutdown};
+use crate::state::{bridge_public, AppState, HttpBackend, Opened, Shutdown};
 
 const NOT_FOUND: &[u8] = b"\
 HTTP/1.1 404 Not Found\r\n\
@@ -107,17 +108,14 @@ where
         write_and_close(&mut sock, BAD_REQUEST).await?;
         return Ok(());
     };
-    let route = {
-        let map = app.http_routes.read().expect("routes");
-        map.get(&host).cloned()
-    };
-    let Some(route) = route else {
+    let selected = select_backends(&app, &host);
+    let Some((route_key, backends, start)) = selected else {
         tracing::info!(tunnel = %host, "http host not registered");
         write_and_close(&mut sock, NOT_FOUND).await?;
         return Ok(());
     };
-    tracing::info!(tunnel = %host, "http host routed");
-    let opened = match route.plane.open(route.tunnel_id).await {
+    tracing::info!(tunnel = %host, route = %route_key, backends = backends.len(), "http host routed");
+    let opened = match open_with_failover(&backends, start).await {
         Ok(opened) => opened,
         Err(err) => {
             tracing::debug!(%host, error = %err, "http tunnel busy or unavailable");
@@ -127,6 +125,41 @@ where
     };
     bridge_public(sock, opened, &head).await?;
     Ok(())
+}
+
+/// Snapshot backends for the matching host key and the RR start index.
+fn select_backends(app: &AppState, host: &str) -> Option<(String, Vec<HttpBackend>, usize)> {
+    let map = app.http_routes.read().expect("routes");
+    let key = resolve_hostname_key(host, map.keys().map(|k| k.as_str()))?.to_string();
+    let group = map.get(&key)?;
+    let backends = group.snapshot_backends();
+    if backends.is_empty() {
+        return None;
+    }
+    let start = group.next_start(backends.len());
+    Some((key, backends, start))
+}
+
+/// Round-robin start, then walk the ring once on `open()` failure before 503.
+async fn open_with_failover(backends: &[HttpBackend], start: usize) -> anyhow::Result<Opened> {
+    let n = backends.len();
+    let mut last_err = None;
+    for i in 0..n {
+        let backend = &backends[(start + i) % n];
+        match backend.plane.open(backend.tunnel_id).await {
+            Ok(opened) => return Ok(opened),
+            Err(err) => {
+                tracing::debug!(
+                    backend_id = backend.id,
+                    tunnel_id = backend.tunnel_id,
+                    error = %err,
+                    "http backend open failed; trying next"
+                );
+                last_err = Some(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no http backends")))
 }
 
 async fn write_and_close<S: AsyncWrite + Unpin>(sock: &mut S, bytes: &[u8]) -> anyhow::Result<()> {

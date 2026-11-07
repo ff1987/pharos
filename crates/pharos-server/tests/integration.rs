@@ -1605,3 +1605,340 @@ timeout_secs = 45
     server.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+async fn spawn_hello_body(body: &'static [u8]) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let _ = tokio::time::timeout(Duration::from_secs(2), sock.read(&mut buf)).await;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                let _ = sock.write_all(body).await;
+            });
+        }
+    });
+    addr
+}
+
+async fn http_get(addr: SocketAddr, host: &str) -> Vec<u8> {
+    let mut sock = connect_retry(addr).await;
+    let req = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    sock.write_all(req.as_bytes()).await.unwrap();
+    let mut body = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut body))
+        .await
+        .expect("http timed out")
+        .unwrap();
+    body
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_wildcard_host_routing() {
+    let id = identity();
+    let origin = spawn_hello_body(b"wild-ok").await;
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\n[http]\nbind = \"127.0.0.1:0\"\n[acl]\nallow_any_hostname = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let http_addr = server.http_addr.expect("http");
+    let tunnels = format!(
+        "[[tunnels]]\nname = \"web\"\ntype = \"http\"\nlocal = \"{origin}\"\nhostname = \"*.example.com\"\n"
+    );
+    let config = client_config(
+        "correct-token",
+        server.tls_addr.expect("tls"),
+        "tls",
+        &id.cert,
+        &tunnels,
+        SLOW_HEARTBEAT,
+    );
+    let mut client = pharos_client::spawn(config).await.unwrap();
+    let events = until_settled(&mut client).await;
+    assert!(
+        matches!(events.last(), Some(ClientEvent::Ready)),
+        "{events:?}"
+    );
+
+    let hit = http_get(http_addr, "app.example.com").await;
+    assert!(
+        hit.windows(7).any(|w| w == b"wild-ok"),
+        "body: {}",
+        String::from_utf8_lossy(&hit)
+    );
+
+    let other = http_get(http_addr, "app.other.com").await;
+    assert!(
+        String::from_utf8_lossy(&other).contains("404"),
+        "{}",
+        String::from_utf8_lossy(&other)
+    );
+
+    let nested = http_get(http_addr, "a.b.example.com").await;
+    assert!(
+        String::from_utf8_lossy(&nested).contains("404"),
+        "single-label wildcard must not match nested host: {}",
+        String::from_utf8_lossy(&nested)
+    );
+
+    client.shutdown().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_exact_beats_wildcard() {
+    let id = identity();
+    let wild_origin = spawn_hello_body(b"from-wild").await;
+    let exact_origin = spawn_hello_body(b"from-exact").await;
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\n[http]\nbind = \"127.0.0.1:0\"\n[acl]\nallow_any_hostname = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let http_addr = server.http_addr.expect("http");
+    let tls = server.tls_addr.expect("tls");
+
+    let wild_tunnels = format!(
+        "[[tunnels]]\nname = \"wild\"\ntype = \"http\"\nlocal = \"{wild_origin}\"\nhostname = \"*.example.com\"\n"
+    );
+    let mut wild_client = pharos_client::spawn(client_config(
+        "correct-token",
+        tls,
+        "tls",
+        &id.cert,
+        &wild_tunnels,
+        SLOW_HEARTBEAT,
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        until_settled(&mut wild_client).await.last(),
+        Some(ClientEvent::Ready)
+    ));
+
+    let exact_tunnels = format!(
+        "[[tunnels]]\nname = \"exact\"\ntype = \"http\"\nlocal = \"{exact_origin}\"\nhostname = \"app.example.com\"\n"
+    );
+    let mut exact_client = pharos_client::spawn(client_config(
+        "correct-token",
+        tls,
+        "tls",
+        &id.cert,
+        &exact_tunnels,
+        SLOW_HEARTBEAT,
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        until_settled(&mut exact_client).await.last(),
+        Some(ClientEvent::Ready)
+    ));
+
+    let body = http_get(http_addr, "app.example.com").await;
+    assert!(
+        body.windows(10).any(|w| w == b"from-exact"),
+        "exact must beat wildcard: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let other = http_get(http_addr, "other.example.com").await;
+    assert!(
+        other.windows(9).any(|w| w == b"from-wild"),
+        "wildcard still serves siblings: {}",
+        String::from_utf8_lossy(&other)
+    );
+
+    exact_client.shutdown().await;
+    wild_client.shutdown().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_same_hostname_round_robin() {
+    let id = identity();
+    let a = spawn_hello_body(b"backend-a").await;
+    let b = spawn_hello_body(b"backend-b").await;
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\n[http]\nbind = \"127.0.0.1:0\"\n[acl]\nallow_any_hostname = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let http_addr = server.http_addr.expect("http");
+    let tls = server.tls_addr.expect("tls");
+
+    let mut client_a = pharos_client::spawn(client_config(
+        "correct-token",
+        tls,
+        "tls",
+        &id.cert,
+        &format!(
+            "[[tunnels]]\nname = \"a\"\ntype = \"http\"\nlocal = \"{a}\"\nhostname = \"demo.local\"\n"
+        ),
+        SLOW_HEARTBEAT,
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        until_settled(&mut client_a).await.last(),
+        Some(ClientEvent::Ready)
+    ));
+
+    let mut client_b = pharos_client::spawn(client_config(
+        "correct-token",
+        tls,
+        "tls",
+        &id.cert,
+        &format!(
+            "[[tunnels]]\nname = \"b\"\ntype = \"http\"\nlocal = \"{b}\"\nhostname = \"demo.local\"\n"
+        ),
+        SLOW_HEARTBEAT,
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        until_settled(&mut client_b).await.last(),
+        Some(ClientEvent::Ready)
+    ));
+
+    let mut saw_a = false;
+    let mut saw_b = false;
+    for _ in 0..20 {
+        let body = http_get(http_addr, "demo.local").await;
+        if body.windows(9).any(|w| w == b"backend-a") {
+            saw_a = true;
+        }
+        if body.windows(9).any(|w| w == b"backend-b") {
+            saw_b = true;
+        }
+        if saw_a && saw_b {
+            break;
+        }
+    }
+    assert!(saw_a && saw_b, "expected both LB backends across requests");
+
+    client_a.shutdown().await;
+    // Give the server a moment to drop A's backend.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..8 {
+        let body = http_get(http_addr, "demo.local").await;
+        assert!(
+            body.windows(9).any(|w| w == b"backend-b"),
+            "remaining backend should still serve: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            !body.windows(9).any(|w| w == b"backend-a"),
+            "disconnected backend must not serve: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    client_b.shutdown().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn https_wildcard_host_routing() {
+    let id = identity();
+    let origin = spawn_hello_body(b"https-wild").await;
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\n[https]\nbind = \"127.0.0.1:0\"\n[acl]\nallow_any_hostname = true\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let https_addr = server.https_addr.expect("https");
+    let tunnels = format!(
+        "[[tunnels]]\nname = \"web\"\ntype = \"http\"\nlocal = \"{origin}\"\nhostname = \"*.example.com\"\n"
+    );
+    let mut client = pharos_client::spawn(client_config(
+        "correct-token",
+        server.tls_addr.expect("tls"),
+        "tls",
+        &id.cert,
+        &tunnels,
+        SLOW_HEARTBEAT,
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        until_settled(&mut client).await.last(),
+        Some(ClientEvent::Ready)
+    ));
+
+    let connector = https_connector(&id.cert);
+    let mut sock = https_connect(&connector, https_addr).await;
+    sock.write_all(b"GET / HTTP/1.1\r\nHost: app.example.com\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let body = read_http_body(&mut sock).await;
+    assert!(
+        body.windows(10).any(|w| w == b"https-wild"),
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let mut missing = https_connect(&connector, https_addr).await;
+    missing
+        .write_all(b"GET / HTTP/1.1\r\nHost: a.b.example.com\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let denied = read_http_body(&mut missing).await;
+    assert!(
+        String::from_utf8_lossy(&denied).contains("404"),
+        "{}",
+        String::from_utf8_lossy(&denied)
+    );
+
+    client.shutdown().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acl_allows_listed_wildcard_pattern() {
+    let id = identity();
+    let origin = spawn_hello_body(b"acl-wild").await;
+    let server = boot_server(
+        "correct-token",
+        "tls_bind = \"127.0.0.1:0\"\n[http]\nbind = \"127.0.0.1:0\"\n[acl]\nallow_hostnames = [\"*.example.com\"]\n[heartbeat]\ninterval_secs = 15\ntimeout_secs = 45\n",
+        &id,
+    )
+    .await;
+    let tunnels = format!(
+        "[[tunnels]]\nname = \"web\"\ntype = \"http\"\nlocal = \"{origin}\"\nhostname = \"*.example.com\"\n"
+    );
+    let mut client = pharos_client::spawn(client_config(
+        "correct-token",
+        server.tls_addr.expect("tls"),
+        "tls",
+        &id.cert,
+        &tunnels,
+        SLOW_HEARTBEAT,
+    ))
+    .await
+    .unwrap();
+    let events = until_settled(&mut client).await;
+    assert!(
+        matches!(events.last(), Some(ClientEvent::Ready)),
+        "{events:?}"
+    );
+    let body = http_get(server.http_addr.expect("http"), "app.example.com").await;
+    assert!(
+        body.windows(8).any(|w| w == b"acl-wild"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    client.shutdown().await;
+    server.shutdown().await.unwrap();
+}

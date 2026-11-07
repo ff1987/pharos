@@ -72,7 +72,7 @@ Types `0x80` through `0xFE` are optional. A peer that does not recognize one ski
 | 1 | Bad version |
 | 2 | Authentication failed |
 | 3 | ACL denied |
-| 4 | Bind failed (port in use, or hostname taken) |
+| 4 | Bind failed (port in use) |
 | 5 | Bad frame |
 | 6 | Feature not available (for example HTTP with no HTTP listener) |
 | 7 | Tunnel or stream limit |
@@ -114,7 +114,7 @@ The server calls open on a new bidirectional stream and writes one `OpenStream` 
 
 ### HTTP
 
-The server reads the request head (up to 16 KiB, up to the first `\r\n\r\n`), takes the hostname from `Host`, and ignores a trailing `:port` or the brackets of an IPv6 literal. A known host is bridged to that tunnel, including the bytes already read. An unknown host gets `404` and the connection closes. A missing host gets `400`. A full stream table gets `503`.
+The server reads the request head (up to 16 KiB, up to the first `\r\n\r\n`), takes the hostname from `Host`, and ignores a trailing `:port` or the brackets of an IPv6 literal. Matching order: exact registered hostname (case-insensitive), else the longest matching single-label wildcard (`*.example.com` matches one label only). Multiple clients may register the same key; each request round-robins across backends, and a failed stream `open()` tries the other backends once around the ring before `503`. A known host is bridged to the chosen tunnel, including the bytes already read. An unknown host gets `404` and the connection closes. A missing host gets `400`.
 
 ### UDP
 
