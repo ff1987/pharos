@@ -738,12 +738,20 @@ async fn mtls_rejects_untrusted_client_certificate() {
     let events = until_settled(&mut client).await;
     match events.last() {
         Some(ClientEvent::SessionEnded { error: Some(error) }) => {
+            let lower = error.to_lowercase();
+            // Windows often surfaces the TLS alert as a TCP reset (WSAECONNRESET /
+            // "forcibly closed") instead of a rustls handshake string.
             assert!(
-                error.to_lowercase().contains("cert")
-                    || error.to_lowercase().contains("handshake")
-                    || error.to_lowercase().contains("tls")
-                    || error.to_lowercase().contains("unknown")
-                    || error.to_lowercase().contains("alert"),
+                lower.contains("cert")
+                    || lower.contains("handshake")
+                    || lower.contains("tls")
+                    || lower.contains("unknown")
+                    || lower.contains("alert")
+                    || lower.contains("forcibly closed")
+                    || lower.contains("connection reset")
+                    || lower.contains("connection abort")
+                    || lower.contains("10054")
+                    || lower.contains("broken pipe"),
                 "untrusted client certificate was not rejected clearly: {error}"
             );
         }
